@@ -107,7 +107,16 @@ export function CrawlerDashboard() {
 
   const [seedInput, setSeedInput] = useState('');
   const [copied, setCopied] = useState(false);
+  // Settings live in the engine (not React state) — bump a tick to re-read
+  // them after each change so switches reflect the new value immediately.
+  // Without this, toggles appear unresponsive until the next stats tick.
+  const [, setSettingsTick] = useState(0);
   const settings = getSettings();
+
+  const changeSettings = (patch: Parameters<typeof updateSettings>[0]) => {
+    updateSettings(patch);
+    setSettingsTick((t) => t + 1);
+  };
 
   const handleSeed = () => {
     if (!seedInput.trim()) return;
@@ -646,7 +655,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="wifi-only"
                     checked={settings.wifiOnly}
-                    onCheckedChange={(v) => updateSettings({ wifiOnly: v })}
+                    onCheckedChange={(v) => changeSettings({ wifiOnly: v })}
                   />
                 </div>
 
@@ -663,7 +672,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="charging-only"
                     checked={settings.chargingOnly}
-                    onCheckedChange={(v) => updateSettings({ chargingOnly: v })}
+                    onCheckedChange={(v) => changeSettings({ chargingOnly: v })}
                   />
                 </div>
 
@@ -680,7 +689,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="respect-robots"
                     checked={settings.respectRobots}
-                    onCheckedChange={(v) => updateSettings({ respectRobots: v })}
+                    onCheckedChange={(v) => changeSettings({ respectRobots: v })}
                   />
                 </div>
 
@@ -697,7 +706,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="eco-mode"
                     checked={settings.ecoMode}
-                    onCheckedChange={(v) => updateSettings({ ecoMode: v })}
+                    onCheckedChange={(v) => changeSettings({ ecoMode: v })}
                   />
                 </div>
 
@@ -714,7 +723,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="follow-feeds"
                     checked={settings.followFeeds}
-                    onCheckedChange={(v) => updateSettings({ followFeeds: v })}
+                    onCheckedChange={(v) => changeSettings({ followFeeds: v })}
                   />
                 </div>
 
@@ -731,7 +740,7 @@ export function CrawlerDashboard() {
                   <Switch
                     id="follow-sitemaps"
                     checked={settings.followSitemaps}
-                    onCheckedChange={(v) => updateSettings({ followSitemaps: v })}
+                    onCheckedChange={(v) => changeSettings({ followSitemaps: v })}
                   />
                 </div>
               </div>
