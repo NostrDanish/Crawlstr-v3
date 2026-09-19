@@ -7,7 +7,7 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import App from './App.tsx';
 import './index.css';
 
-// FIXME: a custom font should be used. Eg:
+// Custom font: drop in a fontsource import here, e.g.:
 // import '@fontsource-variable/<font-name>';
 
 // Service worker: intentionally NOT registered.
