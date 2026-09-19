@@ -40,7 +40,10 @@ export function parsePage(html: string, baseUrl: string): ParsedPage {
     doc.querySelector('time[datetime]')?.getAttribute('datetime')?.trim() ??
     '';
   const publishedTs = publishedRaw ? Math.floor(new Date(publishedRaw).getTime() / 1000) : NaN;
-  const published = Number.isFinite(publishedTs) ? publishedTs : undefined;
+  // Clamp defensively (SIP-01 finding C-1): a page claiming a pre-1970 date
+  // yields a negative timestamp, and relays reject a negative `published`
+  // tag wholesale. Drop non-positive claims here, before the builder.
+  const published = Number.isFinite(publishedTs) && publishedTs > 0 ? publishedTs : undefined;
 
   // RSS / Atom feeds linked from the page (discovery signal)
   const feeds: FeedLink[] = detectFeeds(doc, baseUrl);
