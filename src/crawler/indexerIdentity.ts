@@ -71,8 +71,8 @@ function writeStored(secretHex: string): void {
 }
 
 function newSecretHex(): string {
-  const sk = generateSecretKey();
-  return typeof sk === 'string' ? sk.toLowerCase() : bytesToHex(sk as Uint8Array);
+  // nostr-tools v2: generateSecretKey() always returns Uint8Array.
+  return bytesToHex(generateSecretKey());
 }
 
 function toIdentity(secretHex: string, fresh: boolean): IndexerIdentity {
