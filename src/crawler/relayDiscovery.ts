@@ -17,6 +17,7 @@
 import type { NostrEvent } from '@nostrify/nostrify';
 import { probeRelays, type RelayCapabilities } from './relayProbe';
 import { normalizeRelayUrl } from './relays';
+import { isPubliclyFetchable } from './safety';
 
 /** Relay-discovery events (NIP-66). */
 const RELAY_DISCOVERY_KIND = 30166;
@@ -50,9 +51,15 @@ export function extractRelaysWithNip(events: NostrEvent[], nip: number): string[
     if (!d) continue;
 
     const normalized = normalizeRelayUrl(d);
-    if (normalized && normalized.startsWith('wss://')) {
-      urls.add(normalized);
-    }
+    if (!normalized || !normalized.startsWith('wss://')) continue;
+
+    // SSRF pre-filter (audit finding #2): kind 30166 events are
+    // attacker-publishable, so drop relays pointing at private/loopback/
+    // link-local hosts before they ever reach the probe path. The probe
+    // itself is guarded too — this just keeps junk out of the candidate set.
+    if (!isPubliclyFetchable(normalized.replace(/^wss:/, 'https:'))) continue;
+
+    urls.add(normalized);
   }
 
   return [...urls];
@@ -72,7 +79,7 @@ export async function discoverRelays(
   const limit = options.limit ?? 400;
   const verifyTop = options.verifyTop ?? 25;
 
-  let events: NostrEvent[] = [];
+  let events: NostrEvent[];
   try {
     events = await queryFn(MONITOR_RELAYS, [
       { kinds: [RELAY_DISCOVERY_KIND], limit },
