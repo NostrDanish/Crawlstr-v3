@@ -110,6 +110,29 @@ describe('buildIndexEvent — spec §5/§6 compliance', () => {
     });
   });
 
+  it('omits `published` for non-positive or non-finite dates (finding C-1)', async () => {
+    // Relay validator: published must match /^\d{1,16}$/ — a pre-1970 page
+    // date produces a negative value and the WHOLE event is rejected.
+    for (const published of [-1, -15608000 /* 1969-07-01 */, 0, NaN, Infinity]) {
+      const event = await buildIndexEvent({
+        url: 'https://example.com/page',
+        title: 'Example Page',
+        published,
+      });
+      expect(event).not.toBeNull();
+      expect(event!.tags.find(([n]) => n === 'published')).toBeUndefined();
+    }
+  });
+
+  it('emits `published` as floored unix seconds for positive dates', async () => {
+    const event = await buildIndexEvent({
+      url: 'https://example.com/page',
+      title: 'Example Page',
+      published: 1786200000.9,
+    });
+    expect(event!.tags.find(([n]) => n === 'published')?.[1]).toBe('1786200000');
+  });
+
   it('drops a non-https image (spec §11)', async () => {
     const event = await buildIndexEvent({
       url: 'https://example.com/page',
@@ -136,11 +159,13 @@ describe('buildIndexEvent — spec §5/§6 compliance', () => {
       tags: ['valid-tag', '-bad', 'also_ok', 'UPPERCASE'],
     });
     const topics = event!.tags.filter(([n]) => n === 't').map(([, v]) => v);
-    // UPPERCASE is lowercased by the builder, then passes; -bad fails the regex.
+    // UPPERCASE is lowercased by the builder, then passes; -bad and also_ok
+    // fail the spec §6 regex ^[a-z0-9][a-z0-9-]{0,99}$ (no leading dash, no
+    // underscores).
     expect(topics).toContain('valid-tag');
-    expect(topics).toContain('also_ok');
     expect(topics).toContain('uppercase');
     expect(topics).not.toContain('-bad');
+    expect(topics).not.toContain('also_ok');
   });
 
   it('validates extension registry values (spec §9.1 rule 5)', async () => {

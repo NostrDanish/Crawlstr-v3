@@ -6,6 +6,7 @@
 
 import { CORS_PROXY_TEMPLATE } from './fetcher';
 import { recordFetch } from './meter';
+import { isPubliclyFetchable } from './safety';
 
 const robotsCache = new Map<string, { rules: RobotsRules; fetchedAt: number }>();
 const CACHE_TTL = 3600000; // 1 hour
@@ -21,7 +22,7 @@ export async function shouldCrawlUrl(url: string): Promise<boolean> {
     const urlObj = new URL(url);
     const robotsUrl = `${urlObj.protocol}//${urlObj.host}/robots.txt`;
 
-    let rules = await getRobotsRules(robotsUrl);
+    const rules = await getRobotsRules(robotsUrl);
     if (!rules) return true; // No robots.txt = allowed
 
     const path = urlObj.pathname;
@@ -49,6 +50,15 @@ export async function getCrawlDelay(url: string): Promise<number> {
 
 /** Fetch robots.txt, falling back to the CORS proxy when blocked directly. */
 async function fetchRobotsText(robotsUrl: string): Promise<string | null> {
+  // SSRF guard — the robots check runs BEFORE fetchPage()'s own guard, so
+  // without this a queued private/loopback URL would make the app ask the
+  // CORS proxy to fetch e.g. http://169.254.169.254/robots.txt. Refuse
+  // non-public targets before ANY request, direct or proxied (audit #1).
+  if (!isPubliclyFetchable(robotsUrl)) {
+    console.debug('[Crawler] Refused non-public robots.txt URL:', robotsUrl);
+    return null;
+  }
+
   const tryOnce = async (requestUrl: string): Promise<string | null> => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);

@@ -100,6 +100,7 @@ export function CrawlerDashboard() {
     previewScout,
     confirmScout,
     dismissScoutPreview,
+    dismissSessionSummary,
     clearAll,
     updateSettings,
     getSettings,
@@ -278,13 +279,13 @@ export function CrawlerDashboard() {
               <div className="flex gap-2">
                 <Button
                   variant="outline"
-                  onClick={() => { setLastSession(null); previewScout(); }}
+                  onClick={() => { dismissSessionSummary(); previewScout(); }}
                   className="flex-1 gap-2 border-primary/40 hover:bg-primary/10"
                 >
                   <Shuffle className="h-4 w-4" />
                   Explore Another
                 </Button>
-                <Button variant="ghost" onClick={() => setLastSession(null)}>
+                <Button variant="ghost" onClick={dismissSessionSummary}>
                   Done
                 </Button>
               </div>

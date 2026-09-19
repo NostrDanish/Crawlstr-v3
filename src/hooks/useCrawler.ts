@@ -38,6 +38,7 @@ export function useCrawler() {
     urlsDiscovered: 0,
     feedsFound: 0,
     sitemapsFound: 0,
+    outboxPending: 0,
   });
   const [recentCrawls, setRecentCrawls] = useState<Array<{
     url: string;
@@ -85,6 +86,9 @@ export function useCrawler() {
         await nostr.relay(relayUrl).event(event, { signal: AbortSignal.timeout(10000) });
       } catch (error) {
         console.debug(`[Crawler] Publish failed for ${relayUrl}:`, error);
+        // The publisher tracks per-relay health and routes zero-accept
+        // events into the IndexedDB outbox — it must see the failure.
+        throw error;
       }
     });
   }, [nostr]);
@@ -168,6 +172,11 @@ export function useCrawler() {
     setScoutPreview(null);
   }, []);
 
+  /** Dismiss the "SCOUT COMPLETE" summary card. */
+  const dismissSessionSummary = useCallback(() => {
+    setLastSession(null);
+  }, []);
+
   /** Random Explorer: keep scouting fresh random seeds within every limit. */
   const startExplorer = useCallback(async (): Promise<string | null> => {
     if (!engineRef.current) return null;
@@ -197,7 +206,6 @@ export function useCrawler() {
       maxBandwidthMB: 25,
       maxPagesPerHour: 100,
       maxDepth: 3,
-      maxConcurrent: 1,
       maxPageSizeKB: 2048,
       ecoMode: true,
       followFeeds: true,
@@ -215,6 +223,7 @@ export function useCrawler() {
     currentSeedCategory: currentSeed ? categoryOf(currentSeed) : undefined,
     scoutPreview,
     lastSession,
+    dismissSessionSummary,
     stats,
     recentCrawls,
     indexerInfo,

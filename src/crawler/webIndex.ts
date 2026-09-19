@@ -207,7 +207,11 @@ export async function buildIndexEvent(
     ...(validLanguage ? [['l', validLanguage] as string[]] : []),
     ['x', x],
     ['v', SIP01_SCHEMA_VERSION],
-    ...(input.published && Number.isFinite(input.published)
+    // §6/validator: published must be unix seconds matching /^\d{1,16}$/ —
+    // pre-1970 claimed dates (negative) would make validating relays reject
+    // the whole event (UNCAGED web-document.ts:374). The sip-01-core
+    // reference builder does NOT guard this, so crawlers must (finding C-1).
+    ...(input.published && Number.isFinite(input.published) && input.published > 0
       ? [['published', String(Math.floor(input.published))] as string[]]
       : []),
     ...(input.source

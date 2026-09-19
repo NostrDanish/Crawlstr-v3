@@ -11,6 +11,7 @@
  */
 
 import { CORS_PROXY_TEMPLATE } from './fetcher';
+import { isPubliclyFetchable } from './safety';
 
 export interface RelayCapabilities {
   url: string;
@@ -33,6 +34,15 @@ export interface RelayCapabilities {
 async function fetchRelayInfo(url: string): Promise<{ json: Record<string, unknown>; latencyMs: number } | null> {
   // NIP-11: the document lives at the relay's HTTP(S) endpoint.
   const httpUrl = url.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+
+  // SSRF guard — relay URLs are sourced from untrusted NIP-66 network
+  // events (anyone can publish a kind 30166 pointing at 169.254.169.254).
+  // Refuse non-public targets before ANY request, direct or proxied
+  // (audit finding #2).
+  if (!isPubliclyFetchable(httpUrl)) {
+    console.debug('[Crawler] Refused non-public relay probe URL:', httpUrl);
+    return null;
+  }
 
   const tryOnce = async (requestUrl: string): Promise<{ json: Record<string, unknown>; latencyMs: number } | null> => {
     const controller = new AbortController();

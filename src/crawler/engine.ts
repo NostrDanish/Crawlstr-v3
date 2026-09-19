@@ -12,8 +12,9 @@ import { parseSitemap, sampleUrls } from './sitemap';
 import { normalizeIndexUrl } from './webIndex';
 import { hashContent } from './hasher';
 import { shouldCrawlUrl, getCrawlDelay, getSitemaps } from './robots';
+import { isPubliclyFetchable } from './safety';
 import { canMakeRequest } from './limits';
-import { publishIndexObservation, publishHeartbeatEvent } from './publisher';
+import { publishIndexObservation, publishHeartbeatEvent, flushObservationOutbox } from './publisher';
 import { buildHeartbeat, HEARTBEAT_INTERVAL_MS } from './heartbeat';
 import { pickRandomSeed, previewRandomSeed, commitSeed } from './seeds';
 import { bytesLastHour, pagesLastHour, recordPage, remainingBytesThisHour } from './meter';
@@ -30,6 +31,7 @@ import {
   getCrawledCount,
   getRecentCrawled,
   clearQueue,
+  getOutboxSize,
 } from './queue';
 import {
   CRAWL_MODES,
@@ -87,6 +89,7 @@ export class CrawlerEngine {
     urlsDiscovered: 0,
     feedsFound: 0,
     sitemapsFound: 0,
+    outboxPending: 0,
   };
   private abortController: AbortController | null = null;
   private onStatsChange?: (stats: CrawlerStats) => void;
@@ -109,6 +112,10 @@ export class CrawlerEngine {
   private followedFeeds = new Set<string>();
   /** Heartbeat timer — a running node announces itself every 10 minutes. */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** Outbox flush timer — held observations retry every 5 minutes. */
+  private outboxTimer: ReturnType<typeof setInterval> | null = null;
+  /** Flushes the outbox the moment connectivity returns. */
+  private onlineHandler: (() => void) | null = null;
 
   constructor(settings?: Partial<CrawlerSettings>) {
     const stored = localStorage.getItem('crawler-settings');
@@ -123,6 +130,7 @@ export class CrawlerEngine {
     await initDB();
     this.stats.queueSize = await getQueueSize();
     this.stats.pagesIndexed = await getCrawledCount();
+    this.stats.outboxPending = await getOutboxSize();
   }
 
   onStats(callback: (stats: CrawlerStats) => void): void {
@@ -167,6 +175,7 @@ export class CrawlerEngine {
     this.abortController = new AbortController();
     this.emitStats();
     this.startHeartbeats();
+    this.startOutboxFlush();
     this.crawlLoop();
   }
 
@@ -174,6 +183,7 @@ export class CrawlerEngine {
     this.running = false;
     this.explorer = false;
     this.stopHeartbeats();
+    this.stopOutboxFlush();
     this.abortController?.abort();
     this.emitStats();
   }
@@ -213,9 +223,30 @@ export class CrawlerEngine {
     localStorage.setItem('crawler-settings', JSON.stringify(this.settings));
   }
 
+  /**
+   * Queue admission gate (audit finding #1): a URL that isn't publicly
+   * fetchable never enters the queue at all, so robots.txt, feeds, sitemaps
+   * and page fetches can never be aimed at loopback/RFC1918/link-local
+   * targets — directly or through the CORS proxy. fetchPage() has its own
+   * guard; this one makes sure the SSRF surface stays closed even on the
+   * fetch paths that run BEFORE it (robots.ts) or bypass it.
+   */
+  private async enqueue(job: CrawlJob): Promise<boolean> {
+    if (!isPubliclyFetchable(job.url)) {
+      console.debug('[Crawler] Refused non-public URL at queue admission:', job.url);
+      return false;
+    }
+    await addToQueue(job);
+    return true;
+  }
+
   async seedUrl(url: string, priority = 1.0): Promise<void> {
     const normalizedUrl = normalizeIndexUrl(url);
     if (!normalizedUrl) return;
+    if (!isPubliclyFetchable(normalizedUrl)) {
+      console.debug('[Crawler] Refused non-public seed URL:', normalizedUrl);
+      return;
+    }
     this.currentSeed = normalizedUrl;
     await addToQueue({
       url: normalizedUrl,
@@ -284,6 +315,13 @@ export class CrawlerEngine {
     return getRecentCrawled(limit);
   }
 
+  /**
+   * The crawl loop is SERIAL BY DESIGN: one job at a time, with politeness
+   * sleeps between fetches. There is deliberately no concurrency knob — the
+   * old `maxConcurrent` setting was never wired to anything and was removed
+   * (audit finding #4) rather than left as a control that silently does
+   * nothing. Per-domain pacing lives in limits.ts + the crawlDelay sleep.
+   */
   private async crawlLoop(): Promise<void> {
     while (this.running) {
       try {
@@ -356,6 +394,16 @@ export class CrawlerEngine {
   }
 
   private async crawlUrl(job: CrawlJob): Promise<void> {
+    // Belt-and-braces SSRF guard for jobs already in the queue (e.g. queued
+    // before the admission gate existed): never run robots.txt or a page
+    // fetch against a non-public target.
+    if (!isPubliclyFetchable(job.url)) {
+      console.debug('[Crawler] Dropped non-public queued URL:', job.url);
+      await removeFromQueue(job.url);
+      this.stats.skipped++;
+      return;
+    }
+
     // Check if already crawled — but only skip when we ACTUALLY fetched it.
     // Feed/sitemap-derived 'observed' entries must not block a real fetch
     // (a feed can announce a page that fails when actually downloaded).
@@ -448,7 +496,7 @@ export class CrawlerEngine {
       : job.url;
     const host = new URL(indexUrl).hostname;
     const platform = detectPlatform(host);
-    await publishIndexObservation({
+    const published = await publishIndexObservation({
       url: indexUrl,
       title: parsed.title,
       description: parsed.description,
@@ -462,6 +510,7 @@ export class CrawlerEngine {
       ...(platform ? { platform } : {}),
       type: platform === 'github' || platform === 'gitlab' ? 'repository' : 'page',
     });
+    await this.notePublishResult(published?.delivered);
 
     // --- Discovery: feeds -------------------------------------------------
     if (this.settings.followFeeds && parsed.feeds.length > 0) {
@@ -495,14 +544,14 @@ export class CrawlerEngine {
         // Skip obvious non-content: login/auth/cart/wallet traps.
         if (this.looksLikeTrap(normalized)) continue;
 
-        await addToQueue({
+        const enqueued = await this.enqueue({
           url: normalized,
           priority: job.priority * 0.8,
           depth: job.depth + 1,
           discoveredFrom: job.url,
           attempts: 0,
         });
-        added++;
+        if (enqueued) added++;
       }
       if (added > 0) {
         this.stats.urlsDiscovered += added;
@@ -544,7 +593,7 @@ export class CrawlerEngine {
         await markCrawled(normalized, await hashContent(entry.title), entry.title, 'observed');
         const host = new URL(normalized).hostname;
         const platform = detectPlatform(host);
-        await publishIndexObservation({
+        const publishedObservation = await publishIndexObservation({
           url: normalized,
           title: entry.title,
           description: entry.summary,
@@ -555,18 +604,19 @@ export class CrawlerEngine {
           ...(platform ? { platform } : {}),
           type: 'article',
         });
+        await this.notePublishResult(publishedObservation?.delivered);
         this.stats.pagesIndexed++;
       }
 
       // And queue it for a real page fetch at lower priority.
-      await addToQueue({
+      const enqueued = await this.enqueue({
         url: normalized,
         priority: fromJob.priority * 0.6,
         depth: fromJob.depth + 1,
         discoveredFrom: feedUrl,
         attempts: 0,
       });
-      discovered++;
+      if (enqueued) discovered++;
     }
 
     this.stats.urlsDiscovered += discovered;
@@ -606,14 +656,14 @@ export class CrawlerEngine {
         if (await isFetched(normalized)) continue;
         if (this.looksLikeTrap(normalized)) continue;
 
-        await addToQueue({
+        const enqueued = await this.enqueue({
           url: normalized,
           priority: fromJob.priority * 0.5,
           depth: fromJob.depth + 1,
           discoveredFrom: sitemapUrl,
           attempts: 0,
         });
-        added++;
+        if (enqueued) added++;
       }
 
       // Sitemap index: follow ONE child sitemap for a taste of what's inside.
@@ -628,14 +678,14 @@ export class CrawlerEngine {
               const normalized = normalizeIndexUrl(url);
               if (!normalized || this.looksLikeTrap(normalized)) continue;
               if (await isFetched(normalized)) continue;
-              await addToQueue({
+              const enqueued = await this.enqueue({
                 url: normalized,
                 priority: fromJob.priority * 0.5,
                 depth: fromJob.depth + 1,
                 discoveredFrom: child,
                 attempts: 0,
               });
-              added++;
+              if (enqueued) added++;
             }
           }
         }
@@ -688,6 +738,52 @@ export class CrawlerEngine {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Observation outbox (audit finding #3 / contract C-2): events that got
+   * zero relay accepts are held in IndexedDB and flushed at crawl start, on
+   * the browser's `online` event, and every 5 minutes while running. A dead
+   * network no longer silently costs observations.
+   */
+  private startOutboxFlush(): void {
+    this.stopOutboxFlush();
+    void this.flushOutbox();
+    this.outboxTimer = setInterval(() => void this.flushOutbox(), 5 * 60 * 1000);
+    this.onlineHandler = () => void this.flushOutbox();
+    window.addEventListener('online', this.onlineHandler);
+  }
+
+  private stopOutboxFlush(): void {
+    if (this.outboxTimer) {
+      clearInterval(this.outboxTimer);
+      this.outboxTimer = null;
+    }
+    if (this.onlineHandler) {
+      window.removeEventListener('online', this.onlineHandler);
+      this.onlineHandler = null;
+    }
+  }
+
+  private async flushOutbox(): Promise<void> {
+    try {
+      const delivered = await flushObservationOutbox();
+      if (delivered > 0) {
+        console.debug(`[Crawler] Outbox flushed ${delivered} held observation(s)`);
+      }
+      this.stats.outboxPending = await getOutboxSize();
+      this.emitStats();
+    } catch (error) {
+      // Flushing is best-effort; the outbox keeps the events for next time.
+      console.debug('[Crawler] Outbox flush failed:', error);
+    }
+  }
+
+  /** Reflect a possibly-enqueued observation in stats immediately. */
+  private async notePublishResult(delivered: number | undefined): Promise<void> {
+    if (delivered === 0) {
+      this.stats.outboxPending = await getOutboxSize();
     }
   }
 

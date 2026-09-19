@@ -60,6 +60,31 @@ describe('isPubliclyFetchable — SSRF guard', () => {
     expect(isPubliclyFetchable('http://1.1.1.1/')).toBe(true);
   });
 
+  it('refuses IPv4-embedded IPv6 bypass vectors (ported from indexstr ssrf.ts)', () => {
+    // IPv4-mapped — dotted and WHATWG-normalized hex-group forms.
+    expect(isPubliclyFetchable('http://[::ffff:127.0.0.1]/')).toBe(false);
+    expect(isPubliclyFetchable('http://[::ffff:7f00:1]/')).toBe(false);
+    expect(isPubliclyFetchable('http://[::ffff:a9fe:a9fe]/')).toBe(false); // 169.254.169.254
+    // IPv4-compatible ::/96 (deprecated, but browsers still parse it).
+    expect(isPubliclyFetchable('http://[::127.0.0.1]/')).toBe(false);
+    expect(isPubliclyFetchable('http://[::7f00:1]/')).toBe(false);
+    // NAT64 64:ff9b::/96 — embedded v4 in the last 32 bits.
+    expect(isPubliclyFetchable('http://[64:ff9b::127.0.0.1]/')).toBe(false);
+    expect(isPubliclyFetchable('http://[64:ff9b::a9fe:a9fe]/')).toBe(false); // 169.254.169.254
+    // 6to4 2002::/16 — embedded v4 in words 1–2.
+    expect(isPubliclyFetchable('http://[2002:7f00:1::]/')).toBe(false);
+    expect(isPubliclyFetchable('http://[2002:a9fe:a9fe::]/')).toBe(false);
+    // Teredo 2001:0000::/32 — client v4 is the last 32 bits XORed.
+    expect(isPubliclyFetchable('http://[2001::80ff:fffe]/')).toBe(false); // client 127.0.0.1
+    // Site-local fec0::/10 (deprecated).
+    expect(isPubliclyFetchable('http://[fec0::1]/')).toBe(false);
+  });
+
+  it('allows public IPv6 — the guard must not over-block', () => {
+    expect(isPubliclyFetchable('http://[2606:4700:4700::1111]/')).toBe(true); // Cloudflare DNS
+    expect(isPubliclyFetchable('http://[64:ff9b::808:808]/')).toBe(true);     // NAT64 of 8.8.8.8
+  });
+
   it('refuses garbage', () => {
     expect(isPubliclyFetchable('not a url')).toBe(false);
     expect(isPubliclyFetchable('')).toBe(false);

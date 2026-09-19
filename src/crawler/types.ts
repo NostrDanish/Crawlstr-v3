@@ -69,6 +69,9 @@ export interface CrawlerStats {
   feedsFound: number;
   /** Sitemaps found this session. */
   sitemapsFound: number;
+  /** Signed observations held in the IndexedDB outbox awaiting relay
+   *  connectivity (zero relay accepts at publish time). */
+  outboxPending: number;
 }
 
 /** Crawl budget presets — how much one session may do before auto-stopping. */
@@ -88,7 +91,6 @@ export interface CrawlerSettings {
   maxBandwidthMB: number;
   maxPagesPerHour: number;
   maxDepth: number;
-  maxConcurrent: number;
   maxPageSizeKB: number;
   ecoMode: boolean;
   /** Follow RSS/Atom feeds found on pages. */
@@ -104,7 +106,6 @@ export const DEFAULT_SETTINGS: CrawlerSettings = {
   maxBandwidthMB: 25,
   maxPagesPerHour: 100,
   maxDepth: 3,
-  maxConcurrent: 1,
   maxPageSizeKB: 2048,
   ecoMode: true,
   followFeeds: true,

@@ -100,7 +100,7 @@ export function parseFeed(xml: string, feedUrl: string, maxEntries = 10): Parsed
           url,
           title: entryTitle || url,
           summary: summary || undefined,
-          published: Number.isFinite(ts) ? ts : undefined,
+          published: Number.isFinite(ts) && ts > 0 ? ts : undefined, // C-1: drop pre-1970 claims
         });
       } catch {
         // Invalid URL, skip
@@ -134,7 +134,7 @@ export function parseFeed(xml: string, feedUrl: string, maxEntries = 10): Parsed
           url,
           title: entryTitle || url,
           summary: summary || undefined,
-          published: Number.isFinite(ts) ? ts : undefined,
+          published: Number.isFinite(ts) && ts > 0 ? ts : undefined, // C-1: drop pre-1970 claims
         });
       } catch {
         // Invalid URL, skip

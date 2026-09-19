@@ -1,7 +1,18 @@
-// IndexedDB-backed crawl queue
+// IndexedDB-backed crawl queue + observation outbox
+//
+// v3 adds an `outbox` store holding signed kind 39697 events that could not
+// be published (zero relay accepts). Local-first rule: crawl progress is
+// never lost because the network is down — events flush on reconnect and on
+// a timer (pattern ported from indexstr's queue.ts).
 
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
+import type { NostrEvent } from '@nostrify/nostrify';
 import type { CrawlJob } from './types';
+
+/** Upper bound for held observations. On overflow the OLDEST entry is
+ *  dropped (newest wins): fresh observations are more valuable to the
+ *  index than stale ones, and a re-crawl can always reproduce the old. */
+export const OUTBOX_MAX = 5000;
 
 interface CrawlerDB extends DBSchema {
   queue: {
@@ -29,6 +40,13 @@ interface CrawlerDB extends DBSchema {
     };
     indexes: { 'by-hash': string };
   };
+  outbox: {
+    key: number;
+    value: {
+      event: NostrEvent;
+      queuedAt: number;
+    };
+  };
 }
 
 let db: IDBPDatabase<CrawlerDB> | null = null;
@@ -36,7 +54,7 @@ let db: IDBPDatabase<CrawlerDB> | null = null;
 export async function initDB(): Promise<IDBPDatabase<CrawlerDB>> {
   if (db) return db;
 
-  db = await openDB<CrawlerDB>('searchstr-crawler', 2, {
+  db = await openDB<CrawlerDB>('searchstr-crawler', 3, {
     upgrade(database, oldVersion) {
       if (oldVersion < 1) {
         const queueStore = database.createObjectStore('queue', { keyPath: 'url' });
@@ -50,6 +68,13 @@ export async function initDB(): Promise<IDBPDatabase<CrawlerDB>> {
       if (oldVersion < 2) {
         // No schema change needed — 'status' is a plain property, and the
         // 'by-hash' index is unchanged. Backfill happens lazily in code.
+      }
+      // v3: the observation outbox — signed events that got zero relay
+      // accepts wait here for connectivity instead of being lost.
+      if (oldVersion < 3) {
+        if (!database.objectStoreNames.contains('outbox')) {
+          database.createObjectStore('outbox', { autoIncrement: true });
+        }
       }
     },
   });
@@ -154,4 +179,57 @@ export async function getRecentCrawled(limit = 20) {
 export async function clearQueue(): Promise<void> {
   const database = await initDB();
   await database.clear('queue');
+}
+
+/* ------------------------------------------------------------------------ */
+/* Observation outbox (offline-first publishing)                             */
+/* ------------------------------------------------------------------------ */
+
+/** Hold a signed observation until relays are reachable again. */
+export async function enqueueOutbox(event: NostrEvent): Promise<void> {
+  const database = await initDB();
+  const count = await database.count('outbox');
+  if (count >= OUTBOX_MAX) {
+    // Newest-wins: drop the oldest held observation (auto-increment keys
+    // mean the first cursor entry is the oldest).
+    const tx = database.transaction('outbox', 'readwrite');
+    const oldest = await tx.store.openCursor();
+    if (oldest) await oldest.delete();
+    await tx.done;
+  }
+  await database.add('outbox', { event, queuedAt: Date.now() });
+}
+
+/** Number of observations waiting for relay connectivity. */
+export async function getOutboxSize(): Promise<number> {
+  const database = await initDB();
+  return database.count('outbox');
+}
+
+/**
+ * Drain the outbox through `publish`. Stops at the first failure so a dead
+ * network doesn't burn retries; entries are removed only after success.
+ * Returns how many were published.
+ */
+export async function flushOutbox(
+  publish: (event: NostrEvent) => Promise<boolean>,
+): Promise<number> {
+  const database = await initDB();
+  let published = 0;
+
+  for (;;) {
+    const tx = database.transaction('outbox', 'readonly');
+    const cursor = await tx.store.openCursor();
+    if (!cursor) break;
+    const key = cursor.primaryKey;
+    const { event } = cursor.value;
+
+    const ok = await publish(event);
+    if (!ok) break;
+
+    await database.delete('outbox', key);
+    published++;
+  }
+
+  return published;
 }
