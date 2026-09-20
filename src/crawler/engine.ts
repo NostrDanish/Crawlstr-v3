@@ -1127,9 +1127,9 @@ export class CrawlerEngine {
   private waitForWake(timeoutMs: number, ac: AbortController | null = this.abortController): Promise<void> {
     return new Promise((resolve) => {
       let settled = false;
-      const timer = setTimeout(cleanup, timeoutMs);
-      const onAbort = () => cleanup();
-      const listener = () => cleanup();
+      // Declared FIRST: every consumer below captures this binding, and the
+      // timeout registration evaluates it immediately (a const used before
+      // its declaration throws a TDZ ReferenceError — the v2.0.0 bug).
       const cleanup = () => {
         if (settled) return;
         settled = true;
@@ -1138,6 +1138,9 @@ export class CrawlerEngine {
         this.wakeListeners.delete(listener);
         resolve();
       };
+      const timer = setTimeout(cleanup, timeoutMs);
+      const onAbort = () => cleanup();
+      const listener = () => cleanup();
       ac?.signal.addEventListener('abort', onAbort, { once: true });
       this.wakeListeners.add(listener);
     });

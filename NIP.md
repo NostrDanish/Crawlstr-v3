@@ -194,6 +194,15 @@ Crawlstr publishes to the same relay pool as the ecosystem:
 - `wss://relay.primal.net/`
 - `wss://relay.damus.io/`
 
+**Observations (kind 39697)** go to the full set above (SIP-01 relays +
+search pool + write relays + user customs). **Heartbeats (kind 16919)** go
+to a deliberately small general-write subset (`relay.ditto.pub`,
+`jskitty.cat`, `relay.primal.net`, `relay.damus.io`, `nostr.hifish.org`) —
+the SIP-01-validating relays only accept kind 39697, and read-only relays
+refuse everything, so heartbeats never target them. Relays that refuse by
+*policy* (`not allowed`, `writes disabled`, `blocked`) are recorded in the
+per-relay health map and skipped immediately instead of being retried.
+
 ## Reading the Index
 
 Any SIP-01 compatible search engine can read Crawlstr's observations:

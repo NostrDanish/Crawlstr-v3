@@ -329,6 +329,13 @@ export function CrawlerDashboard() {
               </span>
               Crawling... Uptime: {formatUptime(stats.uptime)}
             </div>
+            {stats.queueSize === 0 && (
+              <div className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+                The queue is empty — the scout has nothing to crawl yet. Add a
+                seed URL in the <span className="font-medium text-foreground">Seed URLs</span> tab,
+                or stop and press <span className="font-medium text-foreground">Explore a random corner of the web</span>.
+              </div>
+            )}
             <p className="text-xs text-muted-foreground">
               Your node publishes a heartbeat (kind 16919) every 10 min — visible on the SIP-01 network dashboard.
             </p>

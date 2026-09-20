@@ -144,7 +144,7 @@ export interface IndexObservationInput {
   tags?: string[];
   language?: string;
   published?: number;
-  source?: string; // indexer software id, e.g. "crawlstr/1"
+  source?: string; // indexer software id, e.g. "crawlstr/v2"
   /* Extension registry (spec §9.2) — all optional, all ignored by
      consumers that don't know them. */
   type?: string;     // logical document type: page, article, repository, video, …

@@ -52,6 +52,21 @@ export const INDEX_WRITE_RELAYS = [
   'ws://acuy3mjnv26tkyaaucndlxmg2ocntz4rtebhavk57vgruozm42iaznqd.onion/',
 ];
 
+/**
+ * Relays that node heartbeats (kind 16919) are published to — a
+ * deliberately SMALL general-write subset. The SIP-01-validating relays
+ * only accept kind 39697 ("event kind 16919 not allowed on this relay")
+ * and search.nos.today is read-only, so sending heartbeats to the full
+ * observation set just burns rate limits and spams the console.
+ */
+export const HEARTBEAT_RELAYS = [
+  'wss://relay.ditto.pub/',
+  'wss://jskitty.cat/nostr',
+  'wss://relay.primal.net/',
+  'wss://relay.damus.io/',
+  'wss://nostr.hifish.org/',
+];
+
 /* ------------------------------------------------------------------ */
 /* Custom relays (user-managed, localStorage)                          */
 /* ------------------------------------------------------------------ */
@@ -143,4 +158,9 @@ export function getIndexPublishRelays(): string[] {
     }
   }
   return pool;
+}
+
+/** Relays that node heartbeats (kind 16919) go to — see HEARTBEAT_RELAYS. */
+export function getHeartbeatRelays(): string[] {
+  return [...HEARTBEAT_RELAYS];
 }

@@ -2,7 +2,7 @@
 // implementation so the engine's queue admission runs against real code.
 import 'fake-indexeddb/auto';
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CrawlerEngine } from './engine';
 import { getQueueSize, initDB, clearQueue } from './queue';
 import { DEFAULT_SETTINGS } from './types';
@@ -87,5 +87,60 @@ describe('settings honesty (audit finding #4)', () => {
     const settings = engine.getSettings();
     expect(settings.maxDepth).toBe(5);
     expect(settings.ecoMode).toBe(false);
+  });
+});
+
+/**
+ * Regression: the v2.0.0 waitForWake TDZ bug. `const timer = setTimeout(cleanup,
+ * …)` evaluated the cleanup binding before its declaration, throwing
+ * "Cannot access 'cleanup' before initialization" on EVERY empty-queue
+ * iteration — the slot loop crashed in a 10s crash/sleep cycle instead of
+ * idling, and the crawl never progressed.
+ */
+describe('waitForWake (regression: TDZ crash on empty queue)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function waitForWake(engine: CrawlerEngine, ms: number): Promise<void> {
+    return (
+      engine as unknown as { waitForWake(timeoutMs: number): Promise<void> }
+    ).waitForWake(ms);
+  }
+
+  it('resolves cleanly when the timeout fires (no ReferenceError)', async () => {
+    const engine = new CrawlerEngine();
+    const pending = waitForWake(engine, 5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pending).resolves.toBeUndefined();
+  });
+
+  it('resolves early when wake() is called', async () => {
+    const engine = new CrawlerEngine();
+    const pending = waitForWake(engine, 60_000);
+    let done = false;
+    void pending.then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(done).toBe(false);
+    (engine as unknown as { wake(): void }).wake();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(done).toBe(true);
+  });
+
+  it('resolves immediately when the abort controller has fired', async () => {
+    const engine = new CrawlerEngine();
+    const ac = new AbortController();
+    (engine as unknown as { abortController: AbortController | null }).abortController = ac;
+    ac.abort();
+    const pending = (
+      engine as unknown as { waitForWake(ms: number, ac: AbortController): Promise<void> }
+    ).waitForWake(60_000, ac);
+    await expect(pending).resolves.toBeUndefined();
   });
 });

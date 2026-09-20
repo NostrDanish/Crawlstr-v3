@@ -22,7 +22,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 
 import { getIndexerIdentity, getIndexerSecretKey } from './indexerIdentity';
 import { buildIndexEvent, normalizeIndexUrl, type IndexObservationInput } from './webIndex';
-import { getIndexPublishRelays } from './relays';
+import { getHeartbeatRelays, getIndexPublishRelays } from './relays';
 import { enqueueOutbox, flushOutbox } from './queue';
 
 /** Callback type for publishing a signed event to a relay. MUST throw on
@@ -47,9 +47,17 @@ export interface RelayHealth {
   lastOk: number;
   /** last error message, if the last attempt failed */
   lastError?: string;
+  /** true when the relay permanently refuses our events by POLICY
+   *  ("event kind not allowed", "writes disabled", "blocked") — gated
+   *  immediately instead of after RELAY_FAIL_GATE transient failures. */
+  policyBlocked?: boolean;
 }
 
 const relayHealth = new Map<string, RelayHealth>();
+
+/** Relay OK:false messages that mean "never going to accept this", not
+ *  "try again later". Matched case-insensitively against the error text. */
+const POLICY_REJECTION_RE = /not allowed|writes disabled|blocked|banned/i;
 
 function recordRelay(relayUrl: string, success: boolean, error?: unknown): void {
   const entry = relayHealth.get(relayUrl) ?? { ok: 0, fail: 0, lastOk: 0 };
@@ -57,9 +65,13 @@ function recordRelay(relayUrl: string, success: boolean, error?: unknown): void 
     entry.ok++;
     entry.lastOk = Date.now();
     entry.lastError = undefined;
+    entry.policyBlocked = false;
   } else {
     entry.fail++;
     entry.lastError = error instanceof Error ? error.message : String(error);
+    if (POLICY_REJECTION_RE.test(entry.lastError)) {
+      entry.policyBlocked = true;
+    }
   }
   relayHealth.set(relayUrl, entry);
 }
@@ -72,13 +84,16 @@ export function getRelayHealth(): Record<string, RelayHealth> {
 /**
  * Health gate: a relay that has failed 8+ times this session without a
  * single success is skipped (auto-rotation — e.g. the .onion relay on a
- * clearnet browser). One success instantly re-enables it.
+ * clearnet browser). A relay the relay OPERATOR refuses by policy is
+ * skipped immediately. One success instantly re-enables either.
  */
 const RELAY_FAIL_GATE = 8;
 
 function isRelayGated(relayUrl: string): boolean {
   const entry = relayHealth.get(relayUrl);
-  return entry !== undefined && entry.ok === 0 && entry.fail >= RELAY_FAIL_GATE;
+  if (entry === undefined) return false;
+  if (entry.ok > 0) return false;
+  return entry.fail >= RELAY_FAIL_GATE || entry.policyBlocked === true;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -86,20 +101,20 @@ function isRelayGated(relayUrl: string): boolean {
 /* ------------------------------------------------------------------------ */
 
 /**
- * Publish a signed event to all index relays (best-effort).
+ * Publish a signed event to the given relays (best-effort).
  * Returns the number of relays that accepted it.
  */
-async function publishToIndexRelays(signedEvent: NostrEvent): Promise<number> {
-  const relays = getIndexPublishRelays().filter((url) => !isRelayGated(url));
+async function publishToRelays(signedEvent: NostrEvent, relays: string[]): Promise<number> {
+  const targets = relays.filter((url) => !isRelayGated(url));
 
   if (!relayPublishFn) {
     // No relay publisher configured — log for debugging
-    console.debug('[Crawler] No relay publisher configured. Would publish to:', relays);
+    console.debug('[Crawler] No relay publisher configured. Would publish to:', targets);
     return 0;
   }
 
   const results = await Promise.allSettled(
-    relays.map(async (url) => {
+    targets.map(async (url) => {
       await relayPublishFn!(url, signedEvent);
       recordRelay(url, true);
     }),
@@ -110,8 +125,8 @@ async function publishToIndexRelays(signedEvent: NostrEvent): Promise<number> {
     if (result.status === 'fulfilled') {
       accepted++;
     } else {
-      recordRelay(relays[i], false, result.reason);
-      console.debug(`[Crawler] Publish failed for ${relays[i]}:`, result.reason);
+      recordRelay(targets[i], false, result.reason);
+      console.debug(`[Crawler] Publish failed for ${targets[i]}:`, result.reason);
     }
   });
   return accepted;
@@ -122,7 +137,7 @@ async function publishToIndexRelays(signedEvent: NostrEvent): Promise<number> {
  * relay accepted it.
  */
 export async function republishEvent(event: NostrEvent): Promise<boolean> {
-  return (await publishToIndexRelays(event)) > 0;
+  return (await publishToRelays(event, getIndexPublishRelays())) > 0;
 }
 
 /** Drain the outbox through the relay pool. Returns events delivered. */
@@ -165,7 +180,7 @@ export async function publishIndexObservation(
     getIndexerSecretKey(),
   );
 
-  const delivered = await publishToIndexRelays(signedEvent);
+  const delivered = await publishToRelays(signedEvent, getIndexPublishRelays());
   if (delivered === 0) {
     await enqueueOutbox(signedEvent);
   }
@@ -173,12 +188,17 @@ export async function publishIndexObservation(
 }
 
 /**
- * Publish a node heartbeat (kind 16919, replaceable) to the index relays.
- * Best-effort, same as observations — the heartbeat is health metadata, and
- * a missed beat just reads as "offline" on dashboards until the next one.
+ * Publish a node heartbeat (kind 16919, replaceable). Best-effort, same as
+ * observations — the heartbeat is health metadata, and a missed beat just
+ * reads as "offline" on dashboards until the next one.
+ *
+ * Uses the DEDICATED heartbeat relay set: the SIP-01-validating relays only
+ * accept kind 39697 ("event kind 16919 not allowed on this relay") and
+ * search.nos.today is read-only, so pushing heartbeats at the full
+ * observation set burns rate limits for nothing.
  */
 export async function publishHeartbeatEvent(event: NostrEvent): Promise<void> {
-  await publishToIndexRelays(event);
+  await publishToRelays(event, getHeartbeatRelays());
 }
 
 /**
