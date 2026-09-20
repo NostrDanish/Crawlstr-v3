@@ -39,11 +39,16 @@ export function useCrawler() {
     feedsFound: 0,
     sitemapsFound: 0,
     outboxPending: 0,
+    published: 0,
+    ssrfBlocked: 0,
+    trapsBlocked: 0,
+    recrawls: 0,
   });
   const [recentCrawls, setRecentCrawls] = useState<Array<{
     url: string;
     title: string;
     crawledAt: number;
+    status: 'fetched' | 'observed' | 'failed';
   }>>([]);
   const [indexerInfo, setIndexerInfo] = useState<{ pubkeyHex: string; npub: string } | null>(null);
 
@@ -210,6 +215,7 @@ export function useCrawler() {
       ecoMode: true,
       followFeeds: true,
       followSitemaps: true,
+      recrawlEnabled: true,
     };
   }, []);
 

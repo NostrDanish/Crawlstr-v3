@@ -1,4 +1,4 @@
-# Crawlstr
+# Crawlstr v2
 
 <p align="center">
   <img src="public/brand/logo.png" alt="Crawlstr — a spider sitting in its web" width="192" height="192">
@@ -6,7 +6,7 @@
 
 **Decentralized browser-based web crawler.** Turn your browser into a voluntary crawl node that feeds the shared [SIP-01](https://github.com/NostrDanish/SIP-01) index on Nostr — the canonical [Search Index Protocol v1.2](https://github.com/NostrDanish/SIP-01/blob/main/public/spec/SIP-01.md). No backend. No tracking. No accounts required.
 
-Every page you crawl becomes a **kind 39697 web index observation** — instantly searchable by [0xSearchstr](https://0xsearchstr.shakespeare.wtf), [0xPresearchstr](https://presearchstr.shakespeare.wtf), [UNCAGED](https://uncaged.shakespeare.wtf), and any future SIP-01 compatible client.
+Every page you crawl becomes a **kind 39697 web index observation** — instantly searchable by [0xSearchstr](https://0xsearchstr.shakespeare.wtf), [0xPresearchstr](https://presearchstr.shakespeare.wtf), [UNCAGED](https://uncaged.shakespeare.wtf), and any future SIP-01 compatible client. Crawlstr v2 then **keeps those pages alive**: adaptive recrawls re-visit every URL on a change-detected schedule (24h → 30d) and republish the freshness signal.
 
 **Live:** [https://crawlstr.shakespeare.wtf](https://crawlstr.shakespeare.wtf)
 
@@ -63,15 +63,43 @@ Most "decentralized search" projects still run centralized crawlers. Crawlstr ma
 | **Opt-in only** | Nothing runs without explicitly pressing "Start Crawling" |
 | **🎲 Random Scout** | One button — picks a curated starting point you haven't scouted and goes |
 | **SIP-01 native** | Same protocol as 0xSearchstr, 0xPresearchstr, UNCAGED — one shared index |
+| **Adaptive recrawls** | Every page is revisited on a change-detected schedule (24h → 30d) and republished — the network's freshness signal |
 | **Per-device identity** | Anonymous indexer keypair, separate from your Nostr identity |
 | **No query leakage** | Events contain page metadata only — never what anyone searched for |
 | **Resource aware** | Battery, WiFi, bandwidth limits. Eco mode. Charging-only mode. |
 | **robots.txt** | Respected by default (configurable) |
-| **Rate limited** | 5–8 seconds between requests per domain |
+| **Rate limited** | 5–8 seconds between requests per domain, ≤1 request in flight per domain |
+| **Parallel politeness slots** | 2 slot runners over one scheduler — more domain diversity, same per-site rate |
+| **Crawl-trap guards** | Session-state URLs, filter generators and infinite path spaces are refused at the queue gate |
+| **Negative cache** | Permanent failures (4xx, non-HTML, oversize) are remembered for 7 days, not retried forever |
 | **Persistent queue** | IndexedDB-backed, survives browser restarts |
-| **Offline capable** | Crawl queue persists; publishes when Nostr is reachable |
+| **Offline capable** | Zero-ack observations are held in an IndexedDB outbox and flushed when relays are reachable |
+| **Acked-only accounting** | "Published" counts relay-ACKed events — never merely-built ones |
 | **Network heartbeat** | Kind 16919 — visible on the SIP-01 dashboard while running |
 | **PWA** | Installable, works on mobile and desktop |
+
+---
+
+## What's New in v2
+
+Crawlstr v2 keeps the v1 scout philosophy and adds the machinery the v1 index
+was missing. Everything speaks the same SIP-01 wire format (`v` stays `"1"`,
+kind 39697, byte-compatible `d`/`x`) — v2 changes *behavior*, not the
+protocol. Observations are tagged `source=crawlstr/v2`.
+
+| | v1 | v2 (this) |
+|---|---|---|
+| **Recrawls** | Never — `isFetched()` blocked a URL forever, the index went stale | Adaptive freshness schedule: changed → 24h, unchanged → doubles to 30d; republishes the liveness signal |
+| **Fetch failures** | 3 flat retries, then dropped *and forgotten* (re-fetched next discovery) | Classified permanent vs transient; transient get bounded exponential backoff; permanent are negative-cached for 7 days |
+| **Crawl loop** | One serial loop, fixed sleeps | Event-driven, 2 parallel slot runners over a per-domain scheduler; computed sleeps, wake on admission |
+| **Trap defense** | A regex over a few path words | Session keys, query complexity, repeating segments, 9+ digit counters, depth >8, plus a 500-URL/domain intake cap |
+| **Duplicate content** | Dropped entirely — re-fetched on every rediscovery | Recorded (never re-fetched) and still published — the URL's `d` identity with a matching `x` is exactly the §8 agreement signal |
+| **Body reads** | Buffered whole (`response.text()`), bytes metered after the fact | Stream-capped at the size limit with real-byte metering — no multi-MB main-thread allocations |
+| **Published stat** | Pages built (lied when the network was down) | Relay-ACKed only; zero-ack events land in the IndexedDB outbox |
+| **Job claiming** | Read-then-remove (double-crawl race possible) | Atomic claim inside one IndexedDB transaction |
+
+Source-tag history: v1 nodes emit `crawlstr/1`, v2 nodes emit `crawlstr/v2`.
+Both remain valid SIP-01; dashboards can tell the traffic apart.
 
 ---
 
@@ -232,7 +260,7 @@ Crawlstr publishes **SIP-01 (Search Index Protocol)** events — the same protoc
     ["l", "en"],
     ["x", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
     ["v", "1"],
-    ["source", "crawlstr/1"],
+    ["source", "crawlstr/v2"],
     ["network", "clearnet"],
     ["type", "page"],
     ["alt", "Web index observation: Example Page"]
@@ -247,7 +275,7 @@ Crawlstr publishes **SIP-01 (Search Index Protocol)** events — the same protoc
 | `x` | Content hash: `sha256(title + "\n" + description)` |
 | `v` | Schema version `"1"` |
 | `l` | ISO 639-1 language code |
-| `source` | `"crawlstr/1"` |
+| `source` | `"crawlstr/v2"` (v1 nodes: `"crawlstr/1"`) |
 | `network` | Extension registry (§9.2) — always `clearnet` for a browser crawler |
 | `type` | Extension registry — `repository` for GitHub/GitLab, else `page` |
 | `alt` | Human-readable description (the `alt` convention, spec §12.3) |
@@ -340,23 +368,41 @@ For unrestricted crawling, run a desktop/CLI SIP-01 crawler alongside Crawlstr.
 ```
 src/
 ├── crawler/
-│   ├── engine.ts           ← Main crawler orchestrator (crawl loop, queue, scheduling)
-│   ├── queue.ts            ← IndexedDB queue (ready-job scheduling) + observed/fetched split
-│   ├── fetcher.ts          ← HTTP fetcher (CORS, timeout, SSRF-guarded, metered)
+│   ├── engine.ts           ← Main orchestrator: event-driven multi-slot loop,
+│   │                         freshness gate, trap guards, negative cache,
+│   │                         fire-and-track publish lane (source=crawlstr/v2)
+│   ├── queue.ts            ← IndexedDB queue v4: atomic job claims, observed/
+│   │                         fetched/failed split, adaptive recrawl fields,
+│   │                         negative cache + maintenance sweep, outbox
+│   ├── scheduler.ts        ← Politeness allocator: ≤1 request in flight per
+│   │                         domain, interval pacing, parallel fetch slots
+│   ├── fetcher.ts          ← HTTP fetcher: CORS direct→proxy, SSRF-guarded,
+│   │                         stream-capped metered reads, permanent/transient
+│   │                         failure classification
+│   ├── freshness.ts        ← Adaptive recrawl scheduling (24h → 30d doubling)
+│   ├── traps.ts            ← Crawl-trap guards (session state, generators,
+│   │                         depth) + per-domain discovery cap
+│   ├── backoff.ts          ← Bounded exponential backoff for transient failures
 │   ├── safety.ts           ← SSRF guard — refuses non-public targets at the proxy boundary
 │   ├── meter.ts            ← Sliding-window resource accounting (every byte, every page)
 │   ├── parser.ts           ← HTML parser (title, description, text, links, language)
-│   ├── hasher.ts           ← SHA-256 content hashing for local dedup
-│   ├── webIndex.ts         ← SIP-01: URL normalization, event build/parse (byte-compatible)
+│   ├── hasher.ts           ← SHA-256 content hashing for local dedup + change detection
+│   ├── webIndex.ts         ← SIP-01: URL normalization, event build/parse/verify
+│   │                         (byte-compatible, spec §13 test vectors)
 │   ├── indexerIdentity.ts  ← Per-device anonymous indexer keypair
-│   ├── publisher.ts        ← Signs + publishes kind 39697 via finalizeEvent
+│   ├── publisher.ts        ← Signs + publishes kind 39697, relay health gate,
+│   │                         IndexedDB outbox on zero acks
 │   ├── relays.ts           ← Ecosystem relay pool configuration
 │   ├── robots.ts           ← robots.txt parser (policies + Sitemap: discovery)
 │   ├── feed.ts             ← RSS/Atom detection + parsing (cheap discovery)
 │   ├── sitemap.ts          ← XML sitemap parsing (urlset + sitemapindex, sampled)
 │   ├── seeds.ts            ← Random Scout selection engine (weighted strategies)
-│   ├── limits.ts           ← Per-domain rate limiting
-│   └── types.ts            ← TypeScript interfaces (incl. crawl modes)
+│   ├── heartbeat.ts        ← Kind 16919 node heartbeat (schema: Indexstr)
+│   ├── capabilities.ts     ← Coarse, privacy-minimal node capability profile
+│   ├── relayDiscovery.ts   ← NIP-66 relay discovery (NIP-50 / SIP-01 aware)
+│   ├── relayProbe.ts       ← NIP-11 capability probing through the SSRF guard
+│   ├── sharding.ts         ← FNV-1a URL→shard map (heartbeat home shard)
+│   └── types.ts            ← TypeScript interfaces (incl. crawl modes + stats)
 ├── data/
 │   └── seeds/              ← The seed corpus: one plain-text file per category
 ├── components/

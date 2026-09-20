@@ -41,23 +41,24 @@ Consumers treat heartbeats older than **1 hour** as offline.
   "kind": 16919,
   "pubkey": "<device indexer pubkey>",
   "created_at": 1786250000,
-  "content": "{\"v\":\"1\",\"shard\":\"C4\",\"platform\":\"desktop\",\"network\":\"wifi-or-better\",\"charging\":true,\"stats\":{\"pagesIndexed\":1204,\"queueSize\":183,\"published\":1198}}",
+  "content": "{\"v\":\"2\",\"shard\":\"C4\",\"platform\":\"desktop\",\"network\":\"wifi-or-better\",\"charging\":true,\"stats\":{\"pagesIndexed\":1204,\"queueSize\":183,\"published\":1198}}",
   "tags": [
-    ["v", "1"],
+    ["v", "2"],
     ["shard", "C4"],
-    ["source", "crawlstr/1"],
+    ["source", "crawlstr/v2"],
     ["alt", "Crawlstr node heartbeat: shard C4"]
   ]
 }
 ```
 
-**Tags:** `v` (node protocol version), `shard` (home shard, two uppercase hex
-chars — first byte of the indexer pubkey), `source` (`crawlstr/1`), `alt`
-(human-readable).
+**Tags:** `v` (node protocol version — `"2"` for Crawlstr v2 nodes), `shard`
+(home shard, two uppercase hex chars — first byte of the indexer pubkey),
+`source` (`crawlstr/v2`), `alt` (human-readable).
 
 **Content** (JSON): `v`, `shard`, coarse `platform` (`mobile`/`desktop`),
 coarse `network` class, `charging`, and self-reported `stats`
-(`pagesIndexed`, `queueSize`, `published`).
+(`pagesIndexed`, `queueSize`, `published` — the last counts only
+relay-**acked** observations, never merely-built ones).
 
 **Privacy contract:** no location, no IP, no device model, no fine-grained
 fingerprint. Battery/network are deliberately coarse classes.
@@ -94,7 +95,7 @@ public metadata."*
     ["x", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
     ["v", "1"],
     ["published", "1786200000"],
-    ["source", "crawlstr/1"],
+    ["source", "crawlstr/v2"],
     ["network", "clearnet"],
     ["type", "page"],
     ["alt", "Web index observation: Example Page"]
@@ -114,7 +115,7 @@ public metadata."*
 | `l` | – | ISO 639-1 language code, bare two-letter form (§12.5; convention from NIP-32) |
 | `t` | – | 0–8 lowercase topic tags matching `^[a-z0-9][a-z0-9-]{0,99}$` |
 | `published` | – | Unix seconds — page's claimed publication time (§12.2) |
-| `source` | – | `"crawlstr/1"` — identifies this software (≤ 100 chars) |
+| `source` | – | `"crawlstr/v2"` — identifies this software (≤ 100 chars); v1 nodes emitted `crawlstr/1` and remain valid |
 
 **Extension tags (spec §9.2 registry):**
 
@@ -138,6 +139,31 @@ public metadata."*
   produce events with the same `d` — search nodes count distinct authors.
 - **Addressable** — re-crawling the same URL replaces the previous observation
   (one slot per indexer per URL).
+
+### Publisher behavior: adaptive freshness recrawls (v2)
+
+Crawlstr v2 nodes keep an index, not a snapshot. Every successfully crawled
+URL is **revisited on a change-detected schedule** and the observation is
+**republished** with a fresh `created_at`:
+
+- first crawl → recrawl in **24h**;
+- recrawl, content changed (local text hash differs) → back to **24h**;
+- recrawl, content unchanged → interval **doubles** (2d, 4d, 8d … capped at **30d**).
+
+Consumers should read a fresh `created_at` with the same `d` from the same
+indexer as a **liveness signal** ("this page is still alive and says the same
+thing"), not as spam. Because kind 39697 is addressable, the republish costs
+the network one replace per `(pubkey, d)` slot — bounded by construction.
+
+Related publisher-side behaviors that never change the wire format:
+
+- **Negative cache** — permanent fetch failures (4xx, non-HTML, oversize,
+  SSRF refusal) are remembered locally for 7 days instead of being retried;
+  no events are involved.
+- **Crawl-trap guards** — session-state URLs, filter-combination generators
+  and infinite path spaces are refused at the queue gate (500 URLs/domain cap
+  for discovered links); seeds are the human's explicit choice and bypass
+  the guards.
 
 ## How Crawlstr Differs from Other SIP-01 Publishers
 

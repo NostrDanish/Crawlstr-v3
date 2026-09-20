@@ -23,6 +23,8 @@
  * about who surfaced the page. Indexer identity = the event pubkey (§14).
  */
 
+import type { NostrEvent } from '@nostrify/nostrify';
+
 /** Web Index Observation kind (addressable range). */
 export const SIP01_KIND = 39697;
 
@@ -242,4 +244,130 @@ function extensionTags(input: IndexObservationInput): string[][] {
   }
 
   return tags;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Reader side (spec §18) — parse + verify inbound observations             */
+/* ------------------------------------------------------------------------ */
+
+const EXTENSION_TAG_NAMES = ['type', 'platform', 'category', 'network', 'country', 'mime'] as const;
+
+/** A parsed, validated observation (reader view of a kind 39697 event). */
+export interface IndexObservation {
+  /** Document id (d tag). */
+  d: string;
+  /** Canonical URL (u tag, re-normalized per §7). */
+  url: string;
+  title: string;
+  description: string;
+  image?: string;
+  topics: string[];
+  language?: string;
+  contentHash?: string;
+  published?: number;
+  source?: string;
+  /** Registered extension tags present on the event (spec §9.2). */
+  extensions: Record<string, string>;
+  /** Event created_at — the observation time. */
+  observedAt: number;
+  /** Indexer pubkey (event author) — the real indexer identity (§14). */
+  indexer: string;
+  /** The raw event, for provenance. */
+  event: NostrEvent;
+}
+
+function getTag(event: NostrEvent, name: string): string | undefined {
+  return event.tags.find(([n]) => n === name)?.[1];
+}
+
+/**
+ * Parse + validate a kind 39697 event. Returns null for anything malformed:
+ * wrong kind, missing required fields, bad/overlong URL, unsupported schema
+ * version (spec §10: consumers MUST ignore unknown `v`). Cheap synchronous
+ * checks only — hash verification (d ↔ u, x ↔ content) is available via
+ * verifyObservation() for readers that want spec §18 step 2.
+ */
+export function parseIndexEvent(event: NostrEvent): IndexObservation | null {
+  if (event.kind !== SIP01_KIND) return null;
+
+  const d = getTag(event, 'd');
+  const url = getTag(event, 'u');
+  const version = getTag(event, 'v');
+  if (!d?.startsWith(SIP01_D_PREFIX) || !url || version !== SIP01_SCHEMA_VERSION) {
+    return null;
+  }
+  if (url.length > MAX_URL_LEN) return null;
+
+  const normalized = normalizeIndexUrl(url);
+  if (!normalized) return null;
+
+  let title: string;
+  let description: string;
+  let image: string | undefined;
+  try {
+    const parsed = JSON.parse(event.content) as Record<string, unknown>;
+    title = typeof parsed.title === 'string' ? parsed.title.trim().slice(0, MAX_TITLE_LEN) : '';
+    description =
+      typeof parsed.description === 'string'
+        ? parsed.description.trim().slice(0, MAX_DESCRIPTION_LEN)
+        : '';
+    if (typeof parsed.image === 'string' && /^https:\/\//i.test(parsed.image)) {
+      image = parsed.image.slice(0, MAX_IMAGE_LEN);
+    }
+  } catch {
+    return null;
+  }
+  if (!title) return null;
+
+  const topics = event.tags
+    .filter(([n]) => n === 't')
+    .map(([, v]) => v)
+    .filter((v) => TOPIC_RE.test(v))
+    .slice(0, MAX_TOPICS);
+
+  const language = getTag(event, 'l');
+
+  const publishedTag = getTag(event, 'published');
+  const published = publishedTag ? parseInt(publishedTag, 10) : NaN;
+
+  const extensions: Record<string, string> = {};
+  for (const name of EXTENSION_TAG_NAMES) {
+    const value = getTag(event, name);
+    if (value !== undefined) extensions[name] = value;
+  }
+
+  return {
+    d,
+    url: normalized,
+    title,
+    description,
+    image,
+    topics,
+    language: language && LANG_RE.test(language) ? language : undefined,
+    contentHash: getTag(event, 'x'),
+    published: Number.isFinite(published) ? published : undefined,
+    source: getTag(event, 'source'),
+    extensions,
+    observedAt: event.created_at,
+    indexer: event.pubkey,
+    event,
+  };
+}
+
+/**
+ * Full integrity check (spec §18 step 2): verify the d tag matches the
+ * normalized u tag, and — when present — the x tag matches the content.
+ * This is what stops a spoofed observation from squatting on a popular
+ * document's d-tag with fake metadata. Async because of SHA-256.
+ */
+export async function verifyObservation(obs: IndexObservation): Promise<boolean> {
+  const expectedD = await documentId(obs.url);
+  if (obs.d !== expectedD) return false;
+
+  if (obs.contentHash) {
+    const expectedX = await contentHash(obs.title, obs.description);
+    if (obs.contentHash !== expectedX) return false;
+  }
+
+  return true;
 }

@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import type { NostrEvent } from '@nostrify/nostrify';
 import {
   normalizeIndexUrl,
   documentId,
   contentHash,
   buildIndexEvent,
+  parseIndexEvent,
+  verifyObservation,
   SIP01_KIND,
   SIP01_SCHEMA_VERSION,
 } from './webIndex';
@@ -196,5 +199,146 @@ describe('buildIndexEvent — spec §5/§6 compliance', () => {
 
   it('returns null for an empty title', async () => {
     expect(await buildIndexEvent({ url: 'https://example.com/', title: '   ' })).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------------ */
+/* Reader side — spec §18 search-node behavior                              */
+/* ------------------------------------------------------------------------ */
+
+function fakeEvent(partial: Partial<NostrEvent>): NostrEvent {
+  return {
+    id: '0'.repeat(64),
+    pubkey: 'f'.repeat(64),
+    sig: '0'.repeat(128),
+    kind: SIP01_KIND,
+    created_at: 1786250000,
+    content: '{"title":"Example Page","description":"A page about examples."}',
+    tags: [
+      ['d', 'widx:3641c5f2274c5471278ab5bf1df6d185'],
+      ['u', 'https://example.com/page'],
+      ['x', '2a5cbdf44513f552fb571d6c6de2ddf16c5452b235cc887980b52898fb38e7c1'],
+      ['v', '1'],
+      ['alt', 'Web index observation: Example Page'],
+    ],
+    ...partial,
+  };
+}
+
+describe('parseIndexEvent — reader side (spec §18)', () => {
+  it('parses a well-formed observation', () => {
+    const obs = parseIndexEvent(fakeEvent({}));
+    expect(obs).not.toBeNull();
+    expect(obs!.d).toBe('widx:3641c5f2274c5471278ab5bf1df6d185');
+    expect(obs!.url).toBe('https://example.com/page');
+    expect(obs!.title).toBe('Example Page');
+    expect(obs!.description).toBe('A page about examples.');
+    expect(obs!.contentHash).toBe(
+      '2a5cbdf44513f552fb571d6c6de2ddf16c5452b235cc887980b52898fb38e7c1',
+    );
+    expect(obs!.indexer).toBe('f'.repeat(64));
+    expect(obs!.observedAt).toBe(1786250000);
+  });
+
+  it('rejects the wrong kind', () => {
+    expect(parseIndexEvent(fakeEvent({ kind: 1 }))).toBeNull();
+  });
+
+  it('rejects a missing or malformed d tag', () => {
+    const noD = fakeEvent({ tags: fakeEvent({}).tags.filter(([n]) => n !== 'd') });
+    expect(parseIndexEvent(noD)).toBeNull();
+
+    const badD = fakeEvent({
+      tags: fakeEvent({}).tags.map(([n, v]) => (n === 'd' ? ['d', 'notwidx:xyz'] : [n, v])),
+    });
+    expect(parseIndexEvent(badD)).toBeNull();
+  });
+
+  it('rejects an unsupported schema version (spec §10)', () => {
+    const v2 = fakeEvent({
+      tags: fakeEvent({}).tags.map(([n, v]) => (n === 'v' ? ['v', '2'] : [n, v])),
+    });
+    expect(parseIndexEvent(v2)).toBeNull();
+  });
+
+  it('rejects a non-http(s) u tag (spec §11)', () => {
+    const bad = fakeEvent({
+      tags: fakeEvent({}).tags.map(([n, v]) => (n === 'u' ? ['u', 'javascript:alert(1)'] : [n, v])),
+    });
+    expect(parseIndexEvent(bad)).toBeNull();
+  });
+
+  it('rejects unparseable content JSON and empty titles', () => {
+    expect(parseIndexEvent(fakeEvent({ content: 'not json' }))).toBeNull();
+    expect(parseIndexEvent(fakeEvent({ content: '{"title":"  "}' }))).toBeNull();
+    expect(parseIndexEvent(fakeEvent({ content: '{"description":"no title"}' }))).toBeNull();
+  });
+
+  it('collects registered extension tags (spec §9.2)', () => {
+    const withExt = fakeEvent({
+      tags: [
+        ...fakeEvent({}).tags,
+        ['type', 'repository'],
+        ['platform', 'github'],
+        ['network', 'clearnet'],
+      ],
+    });
+    const obs = parseIndexEvent(withExt);
+    expect(obs!.extensions).toEqual({ type: 'repository', platform: 'github', network: 'clearnet' });
+  });
+});
+
+describe('verifyObservation — integrity (spec §18 step 2)', () => {
+  it('accepts a self-consistent event (spec §4 example)', async () => {
+    const obs = parseIndexEvent(fakeEvent({}));
+    expect(obs).not.toBeNull();
+    expect(await verifyObservation(obs!)).toBe(true);
+  });
+
+  it('rejects a spoofed d tag squatting on a popular URL', async () => {
+    const spoofed = fakeEvent({
+      tags: fakeEvent({}).tags.map(([n, v]) =>
+        n === 'd' ? ['d', 'widx:00000000000000000000000000000000'] : [n, v],
+      ),
+    });
+    const obs = parseIndexEvent(spoofed);
+    expect(obs).not.toBeNull(); // shape is fine…
+    expect(await verifyObservation(obs!)).toBe(false); // …but the hashes disagree
+  });
+
+  it('rejects a tampered content hash', async () => {
+    const tampered = fakeEvent({
+      tags: fakeEvent({}).tags.map(([n, v]) => (n === 'x' ? ['x', '0'.repeat(64)] : [n, v])),
+    });
+    const obs = parseIndexEvent(tampered);
+    expect(await verifyObservation(obs!)).toBe(false);
+  });
+
+  it('skips the x check when the tag is absent', async () => {
+    const noX = fakeEvent({ tags: fakeEvent({}).tags.filter(([n]) => n !== 'x') });
+    const obs = parseIndexEvent(noX);
+    expect(await verifyObservation(obs!)).toBe(true);
+  });
+
+  it('round-trips: build → parse → verify', async () => {
+    const unsigned = await buildIndexEvent({
+      url: 'https://example.com/page',
+      title: 'Example Page',
+      description: 'A page about examples.',
+      tags: ['nostr'],
+      language: 'en',
+      source: 'crawlstr/v2',
+      type: 'page',
+      network: 'clearnet',
+    });
+    expect(unsigned).not.toBeNull();
+
+    const event = fakeEvent({
+      content: unsigned!.content,
+      tags: unsigned!.tags,
+    });
+    const obs = parseIndexEvent(event);
+    expect(obs).not.toBeNull();
+    expect(await verifyObservation(obs!)).toBe(true);
   });
 });

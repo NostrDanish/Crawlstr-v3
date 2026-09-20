@@ -1,5 +1,5 @@
 import { useSeoMeta } from '@unhead/react';
-import { Radar, Globe, Shield, Zap, Users, Search } from 'lucide-react';
+import { Radar, Globe, Shield, Zap, Users, Search, RotateCw } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { CrawlerDashboard } from '@/components/crawler/CrawlerDashboard';
 import { CrawlstrLogo } from '@/components/crawler/CrawlstrLogo';
@@ -45,21 +45,24 @@ const Index = () => {
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-primary/10 text-primary text-sm font-medium">
             <Globe className="h-3.5 w-3.5" />
             Powered by Nostr
+            <span className="text-primary/40">·</span>
+            <span className="text-xs">SIP-01 v1.2 · kind 39697</span>
           </div>
           <h1 className="text-4xl sm:text-5xl font-bold tracking-tight">
             Scout the web. Feed the network.
           </h1>
           <p className="text-lg text-muted-foreground max-w-xl mx-auto">
             Turn your browser into a lightweight web scout. Discover pages, feeds,
-            and sitemaps — every observation feeds the shared SIP-01 index,
-            readable by 0xSearchstr, 0xPresearchstr, UNCAGED, and any compatible client.
+            and sitemaps — then keep them fresh with adaptive recrawls. Every
+            observation feeds the shared SIP-01 index, readable by 0xSearchstr,
+            0xPresearchstr, UNCAGED, and any compatible client.
           </p>
         </div>
       </section>
 
       {/* Features */}
       <section className="container max-w-6xl mx-auto px-4 pb-8">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 max-w-3xl mx-auto">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 max-w-4xl mx-auto">
           <div className="flex items-center gap-3 p-4 rounded-lg border bg-card">
             <Shield className="h-8 w-8 text-primary shrink-0" />
             <div>
@@ -84,6 +87,15 @@ const Index = () => {
               <h3 className="font-semibold text-sm">SIP-01 Compatible</h3>
               <p className="text-xs text-muted-foreground">
                 Same protocol as 0xSearchstr, Presearchstr, UNCAGED
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 p-4 rounded-lg border bg-card">
+            <RotateCw className="h-8 w-8 text-primary shrink-0" />
+            <div>
+              <h3 className="font-semibold text-sm">Adaptive Recrawls</h3>
+              <p className="text-xs text-muted-foreground">
+                Pages are revisited on a change-detected schedule — the index stays alive
               </p>
             </div>
           </div>
@@ -121,9 +133,9 @@ const Index = () => {
               },
               {
                 step: '3',
-                icon: Shield,
-                title: 'Hash & Dedupe',
-                desc: 'Content is hashed with SHA-256 to detect duplicates across the network',
+                icon: RotateCw,
+                title: 'Hash, Dedupe & Revisit',
+                desc: 'SHA-256 content hashes detect change; pages are recrawled on an adaptive schedule',
               },
               {
                 step: '4',

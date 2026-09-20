@@ -57,7 +57,7 @@ export interface CrawlerStats {
   viaDirect: number;
   /** Skipped because the site's robots.txt disallows crawling. */
   robotsBlocked: number;
-  /** Could not be retrieved at all (network, proxy, timeout, non-HTML). */
+  /** Could not be retrieved at all after retries (negative-cached). */
   fetchFailed: number;
   /** Skipped because identical content was already indexed. */
   duplicates: number;
@@ -72,6 +72,15 @@ export interface CrawlerStats {
   /** Signed observations held in the IndexedDB outbox awaiting relay
    *  connectivity (zero relay accepts at publish time). */
   outboxPending: number;
+  /** Observations accepted by at least one relay (acked-only accounting —
+   *  v1 counted "built", which lied when the network was down). */
+  published: number;
+  /** Refused before any request: private/loopback/link-local target (SSRF). */
+  ssrfBlocked: number;
+  /** Discovered URLs refused as crawl traps (session state, generators). */
+  trapsBlocked: number;
+  /** Successful adaptive recrawls (freshness.ts) this session. */
+  recrawls: number;
 }
 
 /** Crawl budget presets — how much one session may do before auto-stopping. */
@@ -97,6 +106,10 @@ export interface CrawlerSettings {
   followFeeds: boolean;
   /** Read sitemap.xml for discovery. */
   followSitemaps: boolean;
+  /** Adaptive recrawls (freshness.ts): re-visit crawled pages on a
+   *  change-detected schedule (24h → 30d) and republish the freshness
+   *  signal. Default on — v1 let the index go stale forever. */
+  recrawlEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: CrawlerSettings = {
@@ -110,4 +123,5 @@ export const DEFAULT_SETTINGS: CrawlerSettings = {
   ecoMode: true,
   followFeeds: true,
   followSitemaps: true,
+  recrawlEnabled: true,
 };

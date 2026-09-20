@@ -22,6 +22,10 @@ import {
   Rss,
   Map,
   Link2,
+  RotateCw,
+  Send,
+  Inbox,
+  Ban,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -360,7 +364,27 @@ export function CrawlerDashboard() {
                 <div className="font-bold">{stats.duplicates.toLocaleString()}</div>
                 <div className="text-xs text-muted-foreground">duplicate content</div>
               </div>
+              {(stats.trapsBlocked > 0 || stats.ssrfBlocked > 0) && (
+                <>
+                  <div>
+                    <div className="font-bold">{stats.trapsBlocked.toLocaleString()}</div>
+                    <div className="text-xs text-muted-foreground">crawl traps refused</div>
+                  </div>
+                  <div>
+                    <div className="font-bold">{stats.ssrfBlocked.toLocaleString()}</div>
+                    <div className="text-xs text-muted-foreground">non-public targets refused</div>
+                  </div>
+                </>
+              )}
             </div>
+
+            {stats.trapsBlocked > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Trap URLs (session state, calendar generators, infinite paginators)
+                are refused at the queue gate — one hostile page can't eat the
+                whole crawl budget.
+              </p>
+            )}
 
             {stats.robotsBlocked > 0 && stats.pagesIndexed === 0 && (
               <p className="text-xs text-muted-foreground">
@@ -459,6 +483,39 @@ export function CrawlerDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Network strip — what actually reached the shared index (v2) */}
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-2 text-sm">
+            <div className="flex items-center gap-2">
+              <Send className="h-4 w-4 text-primary" />
+              <span className="font-bold">{stats.published.toLocaleString()}</span>
+              <span className="text-muted-foreground text-xs">published (relay-acked)</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Inbox className="h-4 w-4 text-primary" />
+              <span className="font-bold">{stats.outboxPending.toLocaleString()}</span>
+              <span className="text-muted-foreground text-xs">held in outbox</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <RotateCw className="h-4 w-4 text-primary" />
+              <span className="font-bold">{stats.recrawls.toLocaleString()}</span>
+              <span className="text-muted-foreground text-xs">adaptive recrawls</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Ban className="h-4 w-4 text-primary" />
+              <span className="font-bold">{(stats.trapsBlocked + stats.ssrfBlocked).toLocaleString()}</span>
+              <span className="text-muted-foreground text-xs">traps & non-public refused</span>
+            </div>
+          </div>
+          <p className="text-xs text-center text-muted-foreground mt-3">
+            Every page is revisited on a change-detected schedule (24h → 30d) and
+            republished — the network's freshness signal. Nothing runs without
+            pressing Start.
+          </p>
+        </CardContent>
+      </Card>
 
       {/* Discovery strip — the scout's contribution beyond pages */}
       {(stats.urlsDiscovered > 0 || stats.feedsFound > 0 || stats.sitemapsFound > 0) && (
@@ -623,6 +680,16 @@ export function CrawlerDashboard() {
                             <Badge variant="outline" className="text-xs">
                               kind 39697
                             </Badge>
+                            {page.status === 'observed' && (
+                              <Badge variant="secondary" className="text-xs">
+                                observed via feed
+                              </Badge>
+                            )}
+                            {page.status === 'failed' && (
+                              <Badge variant="destructive" className="text-xs">
+                                failed
+                              </Badge>
+                            )}
                           </div>
                         </div>
                       </div>
@@ -742,6 +809,25 @@ export function CrawlerDashboard() {
                     id="follow-sitemaps"
                     checked={settings.followSitemaps}
                     onCheckedChange={(v) => changeSettings({ followSitemaps: v })}
+                  />
+                </div>
+
+                <Separator />
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <Label htmlFor="adaptive-recrawl">Adaptive recrawls</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Revisit crawled pages on a change-detected schedule (24h → 30d) and republish the freshness signal
+                      </p>
+                    </div>
+                  </div>
+                  <Switch
+                    id="adaptive-recrawl"
+                    checked={settings.recrawlEnabled}
+                    onCheckedChange={(v) => changeSettings({ recrawlEnabled: v })}
                   />
                 </div>
               </div>

@@ -1,9 +1,34 @@
-// Main crawler engine — orchestrates the crawl loop.
+// Main crawler engine — orchestrates the crawl loop (v2).
 //
 // Crawlstr is a SCOUT, not a heavy indexer: human-directed and random
 // discovery, micro-crawls with explicit budgets, feed/sitemap reading for
 // cheap discovery, and SIP-01 publishing. Indexstr owns systematic
 // large-scale crawling; this engine stays lightweight on purpose.
+//
+// v2 architecture (learned from crawlstr-v2, adapted to this codebase):
+//
+//   - EVENT-DRIVEN MULTI-SLOT LOOP: `scheduler.slotCount` parallel slot
+//     runners over the Scheduler allocator (per-domain seriality, interval
+//     pacing, computed sleeps — never busy-polls). v1 was one serial loop
+//     with fixed sleeps; v2 doubles domain-diversity utilization while
+//     keeping ≤1 request in flight per domain and the same per-domain rate.
+//   - ORDERING INVARIANT (structural): every enqueue source (seeds,
+//     discovered links, feeds, sitemaps) funnels through the admission gate:
+//     normalize → SSRF guard → trap guards → queue. Private URLs never
+//     enter the queue from anywhere.
+//   - FRESHNESS (freshness.ts): crawled URLs get an adaptive recrawl
+//     schedule — changed pages return in 24h, unchanged pages double toward
+//     30d. v1 never recrawled; the index went stale forever.
+//   - NEGATIVE CACHE: permanent fetch failures are remembered for 7 days
+//     instead of being retried forever or forgotten and re-fetched.
+//   - DISCRIMINATED FETCH OUTCOMES (fetcher.ts): permanent vs transient,
+//     transient failures get bounded exponential backoff (backoff.ts).
+//   - TRAP GUARDS (traps.ts): session-state URLs, filter generators and
+//     infinite path spaces never enter the queue; a per-domain cap stops
+//     one host from flooding discovery.
+//   - FIRE-AND-TRACK PUBLISH LANE: relay fan-out never blocks the crawl
+//     loop; the lane drains on stop. `stats.published` counts only
+//     relay-ACKed events.
 
 import { fetchPage, fetchXml } from './fetcher';
 import { parsePage } from './parser';
@@ -13,25 +38,34 @@ import { normalizeIndexUrl } from './webIndex';
 import { hashContent } from './hasher';
 import { shouldCrawlUrl, getCrawlDelay, getSitemaps } from './robots';
 import { isPubliclyFetchable } from './safety';
-import { canMakeRequest } from './limits';
 import { publishIndexObservation, publishHeartbeatEvent, flushObservationOutbox } from './publisher';
 import { buildHeartbeat, HEARTBEAT_INTERVAL_MS } from './heartbeat';
 import { pickRandomSeed, previewRandomSeed, commitSeed } from './seeds';
 import { bytesLastHour, pagesLastHour, recordPage, remainingBytesThisHour } from './meter';
+import { Scheduler } from './scheduler';
+import { nextFreshness, type FreshnessState } from './freshness';
+import { isLikelyCrawlTrap, DomainIntakeGuard } from './traps';
+import { retryBackoffMs, isRetryable } from './backoff';
 import {
   initDB,
   addToQueue,
-  getNextJob,
+  claimNextJob,
   removeFromQueue,
+  isQueued,
   getQueueSize,
   getCrawled,
   isFetched,
+  isFailureCached,
   markCrawled,
+  markFailed,
+  getDueRecrawlUrls,
+  maintenanceSweep,
   findByHash,
   getCrawledCount,
   getRecentCrawled,
   clearQueue,
   getOutboxSize,
+  type CrawledRecord,
 } from './queue';
 import {
   CRAWL_MODES,
@@ -42,6 +76,11 @@ import {
   type CrawlJob,
 } from './types';
 
+/** Indexer software id for the SIP-01 `source` tag (v2 nodes identify as
+ *  `crawlstr/v2` so indexers and stats dashboards can distinguish v1/v2
+ *  Crawlstr traffic from Indexstr). */
+export const CRAWLER_SOURCE = 'crawlstr/v2';
+
 /** What one scouting session accomplished — for the completion summary. */
 export interface SessionSummary {
   seed: string | null;
@@ -50,6 +89,9 @@ export interface SessionSummary {
   feeds: number;
   sitemaps: number;
 }
+
+/** A claimed job: either from the queue or an adaptive recrawl. */
+type ClaimedJob = CrawlJob & { recrawl?: boolean };
 
 /**
  * Map well-known hosts to SIP-01 §9.2 `platform` extension values.
@@ -90,6 +132,10 @@ export class CrawlerEngine {
     feedsFound: 0,
     sitemapsFound: 0,
     outboxPending: 0,
+    published: 0,
+    ssrfBlocked: 0,
+    trapsBlocked: 0,
+    recrawls: 0,
   };
   private abortController: AbortController | null = null;
   private onStatsChange?: (stats: CrawlerStats) => void;
@@ -114,8 +160,28 @@ export class CrawlerEngine {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /** Outbox flush timer — held observations retry every 5 minutes. */
   private outboxTimer: ReturnType<typeof setInterval> | null = null;
+  /** Storage maintenance timer — negative-cache TTL + store cap sweep. */
+  private maintenanceTimer: ReturnType<typeof setInterval> | null = null;
   /** Flushes the outbox the moment connectivity returns. */
   private onlineHandler: (() => void) | null = null;
+
+  /** Politeness allocator — rebuilt from settings on every start. */
+  private scheduler = new Scheduler({
+    minIntervalPerDomainMs: DEFAULT_SETTINGS.ecoMode ? 8000 : 5000,
+    maxCrawlDelayMs: 60_000,
+    parallelism: 2,
+  });
+  /** Per-domain cap on discovered URLs (traps.ts) — one host can't flood
+   *  the queue through link following. Seeds are exempt (explicit choice). */
+  private readonly discoveryGuard = new DomainIntakeGuard(500);
+  /** Wake hooks for sleeping slot runners (event-driven dispatch). */
+  private readonly wakeListeners = new Set<() => void>();
+  /** In-flight publish lane promises — drained on stop. */
+  private readonly publishLane = new Set<Promise<void>>();
+  /** Recrawl URLs currently claimed by a slot (never double-claimed). */
+  private readonly recrawlClaims = new Set<string>();
+  /** Explorer seed-pick guard — only one slot picks the next seed. */
+  private pickingSeed = false;
 
   constructor(settings?: Partial<CrawlerSettings>) {
     const stored = localStorage.getItem('crawler-settings');
@@ -128,6 +194,7 @@ export class CrawlerEngine {
 
   async init(): Promise<void> {
     await initDB();
+    await maintenanceSweep();
     this.stats.queueSize = await getQueueSize();
     this.stats.pagesIndexed = await getCrawledCount();
     this.stats.outboxPending = await getOutboxSize();
@@ -173,10 +240,28 @@ export class CrawlerEngine {
     this.sessionPages = 0;
     this.session = { pages: 0, discovered: 0, feeds: 0, sitemaps: 0 };
     this.abortController = new AbortController();
+    this.scheduler = new Scheduler({
+      minIntervalPerDomainMs: this.settings.ecoMode ? 8000 : 5000,
+      maxCrawlDelayMs: 60_000,
+      parallelism: 2,
+    });
+    this.probedSitemaps.clear();
+    this.followedFeeds.clear();
+    this.pickingSeed = false;
     this.emitStats();
     this.startHeartbeats();
     this.startOutboxFlush();
-    this.crawlLoop();
+    this.startMaintenance();
+
+    // Spawn the parallel slot runners. Each loops independently over the
+    // scheduler — per-domain seriality makes politeness race-free. The
+    // controller is captured per runner so a stale loop from a previous
+    // start() generation exits instead of joining the new one.
+    const ac = this.abortController as AbortController;
+    const slots = this.scheduler.slotCount;
+    for (let i = 0; i < slots; i++) {
+      void this.slotLoop(ac);
+    }
   }
 
   async stop(): Promise<void> {
@@ -184,7 +269,15 @@ export class CrawlerEngine {
     this.explorer = false;
     this.stopHeartbeats();
     this.stopOutboxFlush();
+    this.stopMaintenance();
     this.abortController?.abort();
+    this.wake();
+    // Drain the publish lane with a short grace — a hanging relay must not
+    // stall shutdown, but delivered-then-exited beats dropped accounting.
+    // (Plain timeout, NOT this.sleep — that one resolves instantly on abort.)
+    const drain = Promise.allSettled([...this.publishLane]);
+    const grace = new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+    await Promise.race([drain, grace]);
     this.emitStats();
   }
 
@@ -221,22 +314,36 @@ export class CrawlerEngine {
   updateSettings(settings: Partial<CrawlerSettings>): void {
     this.settings = { ...this.settings, ...settings };
     localStorage.setItem('crawler-settings', JSON.stringify(this.settings));
+    // The politeness interval is baked into the scheduler at start();
+    // changing ecoMode mid-run takes effect on the next start (documented).
   }
 
   /**
-   * Queue admission gate (audit finding #1): a URL that isn't publicly
-   * fetchable never enters the queue at all, so robots.txt, feeds, sitemaps
-   * and page fetches can never be aimed at loopback/RFC1918/link-local
-   * targets — directly or through the CORS proxy. fetchPage() has its own
-   * guard; this one makes sure the SSRF surface stays closed even on the
-   * fetch paths that run BEFORE it (robots.ts) or bypass it.
+   * Queue admission gate: a URL that isn't publicly fetchable never enters
+   * the queue at all, so robots.txt, feeds, sitemaps and page fetches can
+   * never be aimed at loopback/RFC1918/link-local targets — directly or
+   * through the CORS proxy. Discovered URLs additionally pass the trap
+   * guards; seeds are the human's explicit choice and bypass them.
    */
-  private async enqueue(job: CrawlJob): Promise<boolean> {
+  private async enqueue(job: CrawlJob, discovered: boolean): Promise<boolean> {
     if (!isPubliclyFetchable(job.url)) {
       console.debug('[Crawler] Refused non-public URL at queue admission:', job.url);
+      this.stats.ssrfBlocked++;
       return false;
     }
+    if (discovered) {
+      if (isLikelyCrawlTrap(job.url)) {
+        console.debug('[Crawler] Refused crawl-trap URL at admission:', job.url);
+        this.stats.trapsBlocked++;
+        return false;
+      }
+      if (!this.discoveryGuard.allow(job.url)) {
+        console.debug('[Crawler] Domain discovery cap reached:', job.url);
+        return false;
+      }
+    }
     await addToQueue(job);
+    this.wake();
     return true;
   }
 
@@ -245,6 +352,8 @@ export class CrawlerEngine {
     if (!normalizedUrl) return;
     if (!isPubliclyFetchable(normalizedUrl)) {
       console.debug('[Crawler] Refused non-public seed URL:', normalizedUrl);
+      this.stats.ssrfBlocked++;
+      this.emitStats();
       return;
     }
     this.currentSeed = normalizedUrl;
@@ -254,6 +363,7 @@ export class CrawlerEngine {
       depth: 0,
       attempts: 0,
     });
+    this.wake();
     this.stats.queueSize = await getQueueSize();
     this.emitStats();
   }
@@ -311,109 +421,162 @@ export class CrawlerEngine {
     this.emitStats();
   }
 
-  async getRecentCrawls(limit = 20) {
+  async getRecentCrawls(limit = 20): Promise<CrawledRecord[]> {
     return getRecentCrawled(limit);
   }
 
-  /**
-   * The crawl loop is SERIAL BY DESIGN: one job at a time, with politeness
-   * sleeps between fetches. There is deliberately no concurrency knob — the
-   * old `maxConcurrent` setting was never wired to anything and was removed
-   * (audit finding #4) rather than left as a control that silently does
-   * nothing. Per-domain pacing lives in limits.ts + the crawlDelay sleep.
-   */
-  private async crawlLoop(): Promise<void> {
-    while (this.running) {
+  /* ------------------------------------------------------------------ */
+  /* Slot loop — event-driven parallel dispatch over the scheduler       */
+  /* ------------------------------------------------------------------ */
+
+  private async slotLoop(ac: AbortController): Promise<void> {
+    while (this.running && this.abortController === ac) {
       try {
         if (!(await this.canCrawl())) {
-          await this.sleep(10000);
+          await this.sleep(10_000, ac);
           continue;
         }
 
-        const job = await getNextJob();
+        const job = await this.claimJob();
         if (!job) {
-          // Queue empty. Explorer picks a fresh random seed; otherwise stop
-          // when the session budget was the goal and there's nothing left.
-          if (this.explorer) {
-            const seed = pickRandomSeed();
-            if (seed) {
-              this.sessionPages = 0;
-              this.session = { pages: 0, discovered: 0, feeds: 0, sitemaps: 0 };
-              this.probedSitemaps.clear();
-              this.followedFeeds.clear();
-              await this.seedUrl(seed);
-              continue;
+          // Queue empty (and no due recrawls). Explorer picks a fresh random
+          // seed; everyone else naps until a wake event or the poll timeout.
+          if (this.explorer && !this.pickingSeed) {
+            this.pickingSeed = true;
+            try {
+              const seed = pickRandomSeed();
+              if (seed) {
+                this.sessionPages = 0;
+                this.session = { pages: 0, discovered: 0, feeds: 0, sitemaps: 0 };
+                this.probedSitemaps.clear();
+                this.followedFeeds.clear();
+                await this.seedUrl(seed);
+                continue;
+              }
+              // Corpus exhausted — nothing left to explore.
+              this.onSessionEnd?.(this.getSession());
+              await this.stop();
+              return;
+            } finally {
+              this.pickingSeed = false;
             }
           }
-          await this.sleep(5000);
+          await this.waitForWake(30_000, ac);
           continue;
         }
 
-        if (!(await canMakeRequest(job.url))) {
-          job.nextAttempt = Date.now() + 10000;
+        // Robots policy (cached per domain; the lookup is same-origin traffic
+        // and counts toward the domain's politeness lane).
+        const crawlDelay = this.settings.respectRobots ? await getCrawlDelay(job.url) : 0;
+        this.scheduler.noteRequest(job.url);
+
+        if (!this.scheduler.tryAcquire(job.url, crawlDelay)) {
+          const wait = this.scheduler.timeUntilNextRequest(job.url, crawlDelay);
+          job.nextAttempt = Date.now() + wait;
+          // The job returns to the queue — release the recrawl claim so a
+          // future due-scan can consider it again if the queue drains.
+          if (job.recrawl) this.recrawlClaims.delete(job.url);
           await addToQueue(job);
-          await this.sleep(5000);
+          await this.waitForWake(Math.min(Math.max(wait, 1_000), 30_000), ac);
           continue;
         }
 
-        await this.crawlUrl(job);
+        try {
+          await this.crawlUrl(job);
+        } finally {
+          this.scheduler.release(job.url);
+          if (job.recrawl) this.recrawlClaims.delete(job.url);
+        }
         this.emitStats();
 
         // Session budget — the crawl modes.
         const maxPages = CRAWL_MODES[this.mode].maxPages;
-        if (maxPages > 0 && this.sessionPages >= maxPages) {
-          if (this.explorer) {
-            const seed = pickRandomSeed();
-            if (seed) {
-              this.sessionPages = 0;
-              this.session = { pages: 0, discovered: 0, feeds: 0, sitemaps: 0 };
-              this.probedSitemaps.clear();
-              this.followedFeeds.clear();
-              await this.seedUrl(seed);
-            } else {
-              this.onSessionEnd?.(this.getSession());
-              await this.stop();
-              return;
-            }
-          } else {
-            this.onSessionEnd?.(this.getSession());
-            await this.stop();
-            return;
-          }
+        if (maxPages > 0 && this.sessionPages >= maxPages && !this.explorer) {
+          this.onSessionEnd?.(this.getSession());
+          await this.stop();
+          return;
         }
-
-        const crawlDelay = this.settings.respectRobots ? await getCrawlDelay(job.url) : 0;
-        await this.sleep(Math.max(crawlDelay, this.settings.ecoMode ? 8000 : 3000));
       } catch (error) {
         console.error('[Crawler] Loop error:', error);
         this.stats.errors++;
         this.emitStats();
-        await this.sleep(10000);
+        await this.sleep(10_000, ac);
       }
     }
   }
 
-  private async crawlUrl(job: CrawlJob): Promise<void> {
-    // Belt-and-braces SSRF guard for jobs already in the queue (e.g. queued
-    // before the admission gate existed): never run robots.txt or a page
-    // fetch against a non-public target.
+  /**
+   * Claim the next unit of work: a ready queue job first, else an adaptive
+   * recrawl that has come due (freshness.ts). Returns null when there is
+   * nothing to do right now.
+   */
+  private async claimJob(): Promise<ClaimedJob | null> {
+    const job = await claimNextJob();
+    if (job) return job;
+
+    if (!this.settings.recrawlEnabled) return null;
+
+    const due = await getDueRecrawlUrls(10, this.recrawlClaims, Date.now());
+    for (const url of due) {
+      if (await isQueued(url)) continue;
+      this.recrawlClaims.add(url);
+      return {
+        url,
+        priority: 0.5,
+        depth: 0,
+        attempts: 0,
+        discoveredFrom: 'recrawl',
+        recrawl: true,
+      };
+    }
+    return null;
+  }
+
+  private async crawlUrl(job: ClaimedJob): Promise<void> {
+    // 1. Belt-and-braces SSRF guard for jobs already in the queue (e.g.
+    //    queued before the admission gate existed): never run robots.txt or
+    //    a page fetch against a non-public target.
     if (!isPubliclyFetchable(job.url)) {
       console.debug('[Crawler] Dropped non-public queued URL:', job.url);
       await removeFromQueue(job.url);
       this.stats.skipped++;
+      this.stats.ssrfBlocked++;
       return;
     }
 
-    // Check if already crawled — but only skip when we ACTUALLY fetched it.
-    // Feed/sitemap-derived 'observed' entries must not block a real fetch
-    // (a feed can announce a page that fails when actually downloaded).
-    if (await isFetched(job.url)) {
+    const existing = await getCrawled(job.url);
+    // Narrowed non-undefined view when the URL was actually fetched before.
+    const existingFetched =
+      existing && existing.status === 'fetched' ? existing : undefined;
+
+    // 2. Negative cache — a permanent failure still inside its TTL is not
+    //    worth another request.
+    if (existing?.status === 'failed' && (await isFailureCached(job.url))) {
       await removeFromQueue(job.url);
       this.stats.skipped++;
       return;
     }
 
-    // Check robots.txt
+    // 3. Freshness gate — already fetched and not due for recrawl: drop.
+    //    (Recrawl jobs claimed by claimJob are due by construction.)
+    //    Records written before v2 have no recrawlDue — treat them as due
+    //    24h after their last crawl so the post-upgrade recrawl wave is
+    //    staggered instead of bursting everything at once.
+    const isRecrawl = existingFetched !== undefined;
+    if (existingFetched) {
+      const DAY_MS = 24 * 3_600_000;
+      const dueAt =
+        existingFetched.recrawlDue !== undefined
+          ? existingFetched.recrawlDue
+          : existingFetched.crawledAt + DAY_MS;
+      if (!this.settings.recrawlEnabled || dueAt > Date.now()) {
+        await removeFromQueue(job.url);
+        this.stats.skipped++;
+        return;
+      }
+    }
+
+    // 4. robots.txt
     if (this.settings.respectRobots) {
       const allowed = await shouldCrawlUrl(job.url);
       if (!allowed) {
@@ -425,78 +588,112 @@ export class CrawlerEngine {
       }
     }
 
-    // Fetch page. Clamp the size cap to the remaining hourly bandwidth so a
-    // single page can't blow the budget — the audit's overshoot finding.
+    // 5. Fetch page. Clamp the size cap to the remaining hourly bandwidth so
+    //    a single page can't blow the budget. Not enough budget → requeue
+    //    for later (the claimed job must not vanish).
     const bandwidthLimitBytes = this.settings.maxBandwidthMB * 1024 * 1024;
     const remainingKB = Math.floor(remainingBytesThisHour(bandwidthLimitBytes) / 1024);
     const effectiveMaxKB = Math.max(0, Math.min(this.settings.maxPageSizeKB, remainingKB));
     if (effectiveMaxKB < 16) {
-      // Not enough budget left for a meaningful page — idle until the window opens.
+      job.nextAttempt = Date.now() + 5 * 60_000;
+      // The job returns to the queue — release any recrawl claim.
+      if (job.recrawl) this.recrawlClaims.delete(job.url);
+      await addToQueue(job);
       return;
     }
-    const result = await fetchPage(job.url, effectiveMaxKB);
-    if (!result) {
-      this.stats.errors++;
-      this.stats.fetchFailed++;
-      job.attempts++;
-      if (job.attempts >= 3) {
+
+    const outcome = await fetchPage(job.url, { maxSizeKB: effectiveMaxKB });
+    if (!outcome.ok) {
+      const failure = outcome.failure;
+      if (failure.kind === 'permanent') {
+        // 4xx, non-HTML, oversize, SSRF redirect: never worth retrying —
+        // remember the failure so discovery doesn't re-fetch it tomorrow.
+        await markFailed(job.url);
         await removeFromQueue(job.url);
+        this.stats.fetchFailed++;
+        if (failure.reason === 'ssrf') this.stats.ssrfBlocked++;
       } else {
-        job.nextAttempt = Date.now() + Math.pow(2, job.attempts) * 60000;
-        await addToQueue(job);
+        // Transient: bounded exponential backoff (backoff.ts).
+        job.attempts++;
+        if (isRetryable(job.attempts)) {
+          job.nextAttempt = Date.now() + retryBackoffMs(job.attempts);
+          await addToQueue(job);
+        } else {
+          await markFailed(job.url);
+          await removeFromQueue(job.url);
+          this.stats.fetchFailed++;
+        }
       }
       return;
     }
+    const result = outcome.page;
 
-    // Parse content
+    // 6. Parse content
     const parsed = parsePage(result.html, job.url);
 
-    // Skip pages with very little content
+    // 7. Thin content — permanent skip (JS-rendered SPAs have no static text).
     if (parsed.wordCount < 10) {
+      await markFailed(job.url);
       await removeFromQueue(job.url);
       this.stats.skipped++;
       this.stats.thinContent++;
       return;
     }
 
-    // Hash content for local dedup
+    // 8. Hash content; change detection against the stored record.
     const localHash = await hashContent(parsed.text);
+    const changed = existingFetched
+      ? existingFetched.contentHash !== localHash
+      : true;
 
-    // Check for duplicate content locally
-    const duplicate = await findByHash(localHash);
-    if (duplicate) {
-      await removeFromQueue(job.url);
-      this.stats.skipped++;
-      this.stats.duplicates++;
-      return;
+    // 9. Cross-page duplicate content. v1 dropped the URL entirely (no local
+    //    record — the next discovery re-fetched it). v2 records it so we
+    //    never re-fetch, and still publishes: the observation's `d` is the
+    //    URL identity, and matching `x` hashes are exactly the agreement
+    //    signal spec §8 is for.
+    if (!isRecrawl) {
+      const duplicate = await findByHash(localHash);
+      if (duplicate && duplicate !== job.url) {
+        this.stats.duplicates++;
+      }
     }
 
-    // Mark as crawled locally
-    await markCrawled(job.url, localHash, parsed.title);
+    // 10. Mark as crawled locally + adaptive freshness schedule.
+    const freshness = nextFreshness(
+      existingFetched
+        ? ({
+            changeCount: existingFetched.changeCount,
+            unchangedStreak: existingFetched.unchangedStreak,
+            lastChangedAt: existingFetched.lastChangedAt,
+          } satisfies FreshnessState)
+        : undefined,
+      changed,
+      Date.now(),
+    );
+    await markCrawled(job.url, localHash, parsed.title, 'fetched', freshness);
     await removeFromQueue(job.url);
 
-    // Update stats
+    // 11. Stats
     this.stats.pagesIndexed++;
     this.sessionPages++;
     this.session.pages++;
+    if (isRecrawl) this.stats.recrawls++;
     recordPage(); // pages/hour budget window
     this.stats.bandwidthUsed += result.size;
     if (result.viaProxy) this.stats.viaProxy++;
     else this.stats.viaDirect++;
     this.stats.queueSize = await getQueueSize();
 
-    // Publish SIP-01 v1.1 observation to the shared index (kind 39697).
-    // Canonical spec: https://github.com/NostrDanish/SIP-01
-    //
-    // If the page claims a canonical URL, the observation is filed under
-    // THAT identity (§7 normalization keeps it byte-compatible with every
-    // other indexer).
+    // 12. Publish SIP-01 observation (kind 39697) — fire-and-track: relay
+    //     fan-out must never stall the crawl loop. If the page claims a
+    //     canonical URL, the observation is filed under THAT identity
+    //     (§7 normalization keeps it byte-compatible with every indexer).
     const indexUrl = parsed.canonical
       ? (normalizeIndexUrl(parsed.canonical) ?? job.url)
       : job.url;
     const host = new URL(indexUrl).hostname;
     const platform = detectPlatform(host);
-    const published = await publishIndexObservation({
+    const publishPromise = publishIndexObservation({
       url: indexUrl,
       title: parsed.title,
       description: parsed.description,
@@ -504,13 +701,25 @@ export class CrawlerEngine {
       language: parsed.language,
       published: parsed.published,
       tags: parsed.keywords,
-      source: 'crawlstr/1',
+      source: CRAWLER_SOURCE,
       // Extension registry (spec §9.2): a browser crawler only ever sees clearnet.
       network: 'clearnet',
       ...(platform ? { platform } : {}),
       type: platform === 'github' || platform === 'gitlab' ? 'repository' : 'page',
-    });
-    await this.notePublishResult(published?.delivered);
+    })
+      .then((published) => {
+        // Acked-only accounting: count events at least one relay accepted.
+        if (published && published.delivered > 0) {
+          this.stats.published++;
+        } else {
+          this.notePublishResult(published?.delivered);
+        }
+        this.emitStats();
+      })
+      .catch((error) => {
+        console.debug('[Crawler] Observation publish failed:', error);
+      });
+    this.trackPublish(publishPromise);
 
     // --- Discovery: feeds -------------------------------------------------
     if (this.settings.followFeeds && parsed.feeds.length > 0) {
@@ -521,7 +730,7 @@ export class CrawlerEngine {
       }
     }
 
-    // --- Discovery: sitemap ----------------------------------------------
+    // --- Discovery: sitemaps ----------------------------------------------
     if (this.settings.followSitemaps) {
       const origin = new URL(job.url).origin;
       if (!this.probedSitemaps.has(origin)) {
@@ -531,7 +740,10 @@ export class CrawlerEngine {
     }
 
     // --- Discovery: links -------------------------------------------------
-    if (job.depth < this.settings.maxDepth) {
+    // Only when content changed (or this is a first crawl): re-queueing the
+    // same neighborhood on every unchanged recrawl would burn the budget
+    // for zero new information.
+    if (job.depth < this.settings.maxDepth && (changed || !isRecrawl)) {
       const maxLinks = this.settings.ecoMode ? 5 : 10;
       let added = 0;
       for (const link of parsed.links.slice(0, maxLinks)) {
@@ -541,16 +753,19 @@ export class CrawlerEngine {
         // Don't re-crawl same URL
         if (normalized === job.url) continue;
 
-        // Skip obvious non-content: login/auth/cart/wallet traps.
-        if (this.looksLikeTrap(normalized)) continue;
+        // Negative-cached failures aren't worth re-discovering.
+        if (await isFailureCached(normalized)) continue;
 
-        const enqueued = await this.enqueue({
-          url: normalized,
-          priority: job.priority * 0.8,
-          depth: job.depth + 1,
-          discoveredFrom: job.url,
-          attempts: 0,
-        });
+        const enqueued = await this.enqueue(
+          {
+            url: normalized,
+            priority: job.priority * 0.8,
+            depth: job.depth + 1,
+            discoveredFrom: job.url,
+            attempts: 0,
+          },
+          true,
+        );
         if (enqueued) added++;
       }
       if (added > 0) {
@@ -567,6 +782,7 @@ export class CrawlerEngine {
    * one small XML file yields a list of current pages with titles and dates.
    */
   private async followFeed(feedUrl: string, fromJob: CrawlJob): Promise<void> {
+    this.scheduler.noteRequest(feedUrl); // feed fetch = same-origin load
     const xml = await fetchXml(feedUrl);
     if (!xml || !looksLikeFeed(xml)) return;
 
@@ -581,7 +797,13 @@ export class CrawlerEngine {
       const normalized = normalizeIndexUrl(entry.url);
       if (!normalized) continue;
 
-      // Skip entries we've already observed.
+      // Trap guards apply to feed-discovered URLs too.
+      if (isLikelyCrawlTrap(normalized)) {
+        this.stats.trapsBlocked++;
+        continue;
+      }
+
+      // Skip entries we already know about (fetched, observed, or failed).
       const existing = await getCrawled(normalized);
       if (existing) continue;
 
@@ -599,23 +821,29 @@ export class CrawlerEngine {
           description: entry.summary,
           language: undefined,
           published: entry.published,
-          source: 'crawlstr/1',
+          source: CRAWLER_SOURCE,
           network: 'clearnet',
           ...(platform ? { platform } : {}),
           type: 'article',
         });
         await this.notePublishResult(publishedObservation?.delivered);
+        if (publishedObservation && publishedObservation.delivered > 0) {
+          this.stats.published++;
+        }
         this.stats.pagesIndexed++;
       }
 
       // And queue it for a real page fetch at lower priority.
-      const enqueued = await this.enqueue({
-        url: normalized,
-        priority: fromJob.priority * 0.6,
-        depth: fromJob.depth + 1,
-        discoveredFrom: feedUrl,
-        attempts: 0,
-      });
+      const enqueued = await this.enqueue(
+        {
+          url: normalized,
+          priority: fromJob.priority * 0.6,
+          depth: fromJob.depth + 1,
+          discoveredFrom: feedUrl,
+          attempts: 0,
+        },
+        true,
+      );
       if (enqueued) discovered++;
     }
 
@@ -636,6 +864,7 @@ export class CrawlerEngine {
     if (candidates.length === 0) candidates.push(fallback);
 
     for (const sitemapUrl of candidates.slice(0, 2)) {
+      this.scheduler.noteRequest(sitemapUrl);
       const xml = await fetchXml(sitemapUrl);
       if (!xml || !looksLikeSitemap(xml)) continue;
 
@@ -652,23 +881,31 @@ export class CrawlerEngine {
       for (const url of sample) {
         const normalized = normalizeIndexUrl(url);
         if (!normalized) continue;
+        if (isLikelyCrawlTrap(normalized)) {
+          this.stats.trapsBlocked++;
+          continue;
+        }
         // Only skip URLs we ACTUALLY fetched — observed ones still get a real fetch.
         if (await isFetched(normalized)) continue;
-        if (this.looksLikeTrap(normalized)) continue;
+        if (await isFailureCached(normalized)) continue;
 
-        const enqueued = await this.enqueue({
-          url: normalized,
-          priority: fromJob.priority * 0.5,
-          depth: fromJob.depth + 1,
-          discoveredFrom: sitemapUrl,
-          attempts: 0,
-        });
+        const enqueued = await this.enqueue(
+          {
+            url: normalized,
+            priority: fromJob.priority * 0.5,
+            depth: fromJob.depth + 1,
+            discoveredFrom: sitemapUrl,
+            attempts: 0,
+          },
+          true,
+        );
         if (enqueued) added++;
       }
 
       // Sitemap index: follow ONE child sitemap for a taste of what's inside.
       if (sitemap.sitemaps.length > 0 && sitemap.urls.length === 0) {
         const child = sitemap.sitemaps[Math.floor(Math.random() * sitemap.sitemaps.length)];
+        this.scheduler.noteRequest(child);
         const childXml = await fetchXml(child);
         if (childXml && looksLikeSitemap(childXml)) {
           const childSitemap = parseSitemap(childXml, child);
@@ -676,15 +913,23 @@ export class CrawlerEngine {
             const childSample = sampleUrls(childSitemap.urls, this.settings.ecoMode ? 10 : 25);
             for (const url of childSample) {
               const normalized = normalizeIndexUrl(url);
-              if (!normalized || this.looksLikeTrap(normalized)) continue;
+              if (!normalized) continue;
+              if (isLikelyCrawlTrap(normalized)) {
+                this.stats.trapsBlocked++;
+                continue;
+              }
               if (await isFetched(normalized)) continue;
-              const enqueued = await this.enqueue({
-                url: normalized,
-                priority: fromJob.priority * 0.5,
-                depth: fromJob.depth + 1,
-                discoveredFrom: child,
-                attempts: 0,
-              });
+              if (await isFailureCached(normalized)) continue;
+              const enqueued = await this.enqueue(
+                {
+                  url: normalized,
+                  priority: fromJob.priority * 0.5,
+                  depth: fromJob.depth + 1,
+                  discoveredFrom: child,
+                  attempts: 0,
+                },
+                true,
+              );
               if (enqueued) added++;
             }
           }
@@ -699,23 +944,9 @@ export class CrawlerEngine {
     }
   }
 
-  /**
-   * Cheap trap detection — URLs that are never content and would waste the
-   * crawl budget or worse (login flows, carts, calendars, trackers).
-   */
-  private looksLikeTrap(url: string): boolean {
-    try {
-      const u = new URL(url);
-      const path = u.pathname.toLowerCase();
-      if (/\/(login|logout|signin|signout|signup|register|auth|account|cart|checkout|basket|wallet|password|reset)\b/.test(path)) return true;
-      if (path.includes('/wp-admin') || path.includes('/wp-login')) return true;
-      if (/\d{4}\/\d{2}\/\d{2}/.test(path) && u.searchParams.has('page')) return true; // calendar paging
-      if (path.endsWith('.zip') || path.endsWith('.exe') || path.endsWith('.dmg') || path.endsWith('.tar.gz')) return true;
-      return false;
-    } catch {
-      return true;
-    }
-  }
+  /* ------------------------------------------------------------------ */
+  /* Heartbeat, outbox, maintenance, publish lane                        */
+  /* ------------------------------------------------------------------ */
 
   /**
    * Node heartbeat (kind 16919, replaceable) — published on start and every
@@ -766,11 +997,43 @@ export class CrawlerEngine {
     }
   }
 
+  /**
+   * Storage maintenance: expired negative-cache entries are deleted (so a
+   * future discovery may retry the URL) and the crawled store is capped.
+   * Runs once at start and hourly while crawling.
+   */
+  private startMaintenance(): void {
+    this.stopMaintenance();
+    this.maintenanceTimer = setInterval(() => {
+      void maintenanceSweep().then(({ failedExpired, evicted }) => {
+        if (failedExpired > 0 || evicted > 0) {
+          console.debug(`[Crawler] Maintenance: ${failedExpired} expired failures, ${evicted} evicted`);
+        }
+      });
+    }, 60 * 60 * 1000);
+  }
+
+  private stopMaintenance(): void {
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+      this.maintenanceTimer = null;
+    }
+  }
+
+  /** Track a fire-and-forget publish so stop() can drain the lane. */
+  private trackPublish(promise: Promise<void>): void {
+    const tracked = promise.finally(() => {
+      this.publishLane.delete(tracked);
+    });
+    this.publishLane.add(tracked);
+  }
+
   private async flushOutbox(): Promise<void> {
     try {
       const delivered = await flushObservationOutbox();
       if (delivered > 0) {
         console.debug(`[Crawler] Outbox flushed ${delivered} held observation(s)`);
+        this.stats.published += delivered;
       }
       this.stats.outboxPending = await getOutboxSize();
       this.emitStats();
@@ -792,7 +1055,7 @@ export class CrawlerEngine {
       const event = await buildHeartbeat({
         pagesIndexed: this.stats.pagesIndexed,
         queueSize: this.stats.queueSize,
-        published: this.stats.pagesIndexed, // pages indexed ≈ observations published
+        published: this.stats.published,
       });
       await publishHeartbeatEvent(event);
     } catch (error) {
@@ -800,6 +1063,10 @@ export class CrawlerEngine {
       console.debug('[Crawler] Heartbeat failed:', error);
     }
   }
+
+  /* ------------------------------------------------------------------ */
+  /* Resource gates + sleeping                                           */
+  /* ------------------------------------------------------------------ */
 
   private async canCrawl(): Promise<boolean> {
     // Check battery
@@ -846,13 +1113,38 @@ export class CrawlerEngine {
     return true;
   }
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => {
+  private sleep(ms: number, ac: AbortController | null = this.abortController): Promise<void> {
+    return new Promise((resolve) => {
       const timeout = setTimeout(resolve, ms);
-      this.abortController?.signal.addEventListener('abort', () => {
+      ac?.signal.addEventListener('abort', () => {
         clearTimeout(timeout);
         resolve();
       });
     });
+  }
+
+  /** Sleep until a wake event, the timeout, or abort — whichever first. */
+  private waitForWake(timeoutMs: number, ac: AbortController | null = this.abortController): Promise<void> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(cleanup, timeoutMs);
+      const onAbort = () => cleanup();
+      const listener = () => cleanup();
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        ac?.signal.removeEventListener('abort', onAbort);
+        this.wakeListeners.delete(listener);
+        resolve();
+      };
+      ac?.signal.addEventListener('abort', onAbort, { once: true });
+      this.wakeListeners.add(listener);
+    });
+  }
+
+  /** Wake all sleeping slot runners (new admissions, shutdown). */
+  private wake(): void {
+    for (const listener of this.wakeListeners) listener();
   }
 }

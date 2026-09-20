@@ -77,7 +77,7 @@ export async function buildHeartbeat(stats: HeartbeatStats): Promise<NostrEvent>
     tags: [
       ['v', CRAWLSTR_NODE_VERSION],
       ['shard', shardLabel(shard)],
-      ['source', 'crawlstr/1'],
+      ['source', 'crawlstr/v2'],
       ['alt', `Crawlstr node heartbeat: shard ${shardLabel(shard)}`],
     ],
   };
