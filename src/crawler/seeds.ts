@@ -251,6 +251,33 @@ export function pickRandomSeed(categoryId?: string): string | null {
   return preview.url;
 }
 
+/**
+ * How many seeds one Random Scout press queues. A bundle (not a single
+ * seed) gives the crawl immediate domain diversity and a fallback: if one
+ * corner is unreachable or thin, the other four still carry the session.
+ */
+export const SCOUT_BUNDLE_SIZE = 5;
+
+/**
+ * Pick N DISTINCT random seeds (v2 simplified UX: one press → one bundle →
+ * run until stopped). Weighted strategies still apply per pick, so the
+ * bundle itself favours fresh/rare corners. Commits each to history.
+ */
+export function pickRandomSeedBundle(count: number = SCOUT_BUNDLE_SIZE): string[] {
+  const picked: string[] = [];
+  const seen = new Set<string>();
+  let attempts = 0;
+  while (picked.length < count && attempts < count * 12) {
+    attempts++;
+    const seed = pickRandomSeed();
+    if (seed && !seen.has(seed)) {
+      seen.add(seed);
+      picked.push(seed);
+    }
+  }
+  return picked;
+}
+
 /* ------------------------------------------------------------------ */
 /* Stats for the UI                                                    */
 /* ------------------------------------------------------------------ */

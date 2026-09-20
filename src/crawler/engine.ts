@@ -40,7 +40,7 @@ import { shouldCrawlUrl, getCrawlDelay, getSitemaps } from './robots';
 import { isPubliclyFetchable } from './safety';
 import { publishIndexObservation, publishHeartbeatEvent, flushObservationOutbox } from './publisher';
 import { buildHeartbeat, HEARTBEAT_INTERVAL_MS } from './heartbeat';
-import { pickRandomSeed, previewRandomSeed, commitSeed } from './seeds';
+import { pickRandomSeed, previewRandomSeed, commitSeed, pickRandomSeedBundle, SCOUT_BUNDLE_SIZE } from './seeds';
 import { bytesLastHour, pagesLastHour, recordPage, remainingBytesThisHour } from './meter';
 import { Scheduler } from './scheduler';
 import { nextFreshness, type FreshnessState } from './freshness';
@@ -142,8 +142,10 @@ export class CrawlerEngine {
   private onModeChange?: (mode: CrawlMode) => void;
   private onSessionEnd?: (summary: SessionSummary) => void;
 
-  /** Active crawl mode — drives the session page budget. */
-  private mode: CrawlMode = 'site';
+  /** Active crawl mode — v2 simplified UX: the scout runs until stopped.
+   *  The mode machinery stays (maxPages budget per session) but the UI no
+   *  longer exposes modes; the effective mode is always 'volunteer'. */
+  private mode: CrawlMode = 'volunteer';
   /** Pages crawled in the current session (reset on start). */
   private sessionPages = 0;
   /** Session-scoped counters for the "SCOUT COMPLETE" summary. */
@@ -402,6 +404,26 @@ export class CrawlerEngine {
   }
 
   /**
+   * Random Scout (v2 simplified UX): ONE control. Picks a bundle of
+   * SCOUT_BUNDLE_SIZE distinct curated seeds, queues them all, and starts
+   * crawling in explorer mode — when the queue drains, a fresh bundle is
+   * picked automatically, so it keeps scouting new corners until stopped.
+   * Pressing the button again calls stop(); pressing it once more starts a
+   * fresh bundle. Returns the seeds queued.
+   */
+  async startScoutBundle(): Promise<string[]> {
+    const seeds = pickRandomSeedBundle(SCOUT_BUNDLE_SIZE);
+    if (seeds.length === 0) return [];
+    this.explorer = true;
+    for (const seed of seeds) {
+      await this.seedUrl(seed);
+    }
+    this.currentSeed = seeds[0] ?? null;
+    await this.start();
+    return seeds;
+  }
+
+  /**
    * Random Explorer: continuous scouting. When the session budget is spent,
    * a fresh random seed is picked automatically. Stays subject to every
    * resource limit — this is opt-in volunteer mode, never the default.
@@ -439,18 +461,22 @@ export class CrawlerEngine {
 
         const job = await this.claimJob();
         if (!job) {
-          // Queue empty (and no due recrawls). Explorer picks a fresh random
-          // seed; everyone else naps until a wake event or the poll timeout.
+          // Queue empty (and no due recrawls). Explorer picks a FRESH BUNDLE
+          // of random seeds so scouting continues across corners until the
+          // user stops it; everyone else naps until a wake event or the poll
+          // timeout.
           if (this.explorer && !this.pickingSeed) {
             this.pickingSeed = true;
             try {
-              const seed = pickRandomSeed();
-              if (seed) {
-                this.sessionPages = 0;
+              const seeds = pickRandomSeedBundle(SCOUT_BUNDLE_SIZE);
+              if (seeds.length > 0) {
                 this.session = { pages: 0, discovered: 0, feeds: 0, sitemaps: 0 };
                 this.probedSitemaps.clear();
                 this.followedFeeds.clear();
-                await this.seedUrl(seed);
+                for (const seed of seeds) {
+                  await this.seedUrl(seed);
+                }
+                this.currentSeed = seeds[0] ?? null;
                 continue;
               }
               // Corpus exhausted — nothing left to explore.

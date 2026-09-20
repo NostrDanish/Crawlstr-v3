@@ -182,6 +182,35 @@ export function useCrawler() {
     setLastSession(null);
   }, []);
 
+  /**
+   * Random Scout (v2 simplified UX): queues a bundle of 5 fresh curated
+   * seeds and starts explorer mode — keeps pulling new bundles until
+   * stopped. Returns the seeds queued (empty when the corpus is exhausted).
+   */
+  const startScoutBundle = useCallback(async (): Promise<string[]> => {
+    const engine = engineRef.current;
+    if (!engine) return [];
+    setLastSession(null);
+    const seeds = await engine.startScoutBundle();
+    if (seeds.length > 0) {
+      setIsRunning(true);
+      setCurrentSeed(seeds[0]);
+    }
+    return seeds;
+  }, []);
+
+  /** One-control scout toggle: running → stop; stopped → fresh bundle + start. */
+  const toggleScout = useCallback(async (): Promise<void> => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    if (engine.isRunning()) {
+      await engine.stop();
+      setIsRunning(false);
+      return;
+    }
+    await startScoutBundle();
+  }, [startScoutBundle]);
+
   /** Random Explorer: keep scouting fresh random seeds within every limit. */
   const startExplorer = useCallback(async (): Promise<string | null> => {
     if (!engineRef.current) return null;
@@ -243,6 +272,8 @@ export function useCrawler() {
     previewScout,
     confirmScout,
     dismissScoutPreview,
+    startScoutBundle,
+    toggleScout,
     startExplorer,
     clearAll,
     updateSettings,

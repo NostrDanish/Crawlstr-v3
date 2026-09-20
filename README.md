@@ -61,7 +61,7 @@ Most "decentralized search" projects still run centralized crawlers. Crawlstr ma
 | Feature | Description |
 |---------|-------------|
 | **Opt-in only** | Nothing runs without explicitly pressing "Start Crawling" |
-| **🎲 Random Scout** | One button — picks a curated starting point you haven't scouted and goes |
+| **🎲 Random Scout** | One button — queues 5 fresh curated corners and keeps scouting until you stop it |
 | **SIP-01 native** | Same protocol as 0xSearchstr, 0xPresearchstr, UNCAGED — one shared index |
 | **Adaptive recrawls** | Every page is revisited on a change-detected schedule (24h → 30d) and republished — the network's freshness signal |
 | **Per-device identity** | Anonymous indexer keypair, separate from your Nostr identity |
@@ -188,7 +188,7 @@ Not plain `Math.random()` over a flat list. Each pick rolls a weighted strategy,
 | 10% | **Stale** | Seeds not scouted for the longest time |
 | 10% | **Random** | Pure randomness |
 
-Previewing a seed (the "random corner" card) does **not** count as scouting it — a dismissed preview never penalizes the seed. The selection commits only when the crawl actually starts.
+The selection commits to history when a bundle is queued — a seed is only "scouted" once the crawl actually starts.
 
 ### Seed a URL
 
@@ -200,16 +200,19 @@ https://bitcoin.org
 
 The crawler fetches the page, extracts content, hashes it, signs a SIP-01 observation, and publishes to Nostr. Then it follows links up to depth 3.
 
-### Crawl Modes
+### How It Runs
 
-| Mode | Budget | Purpose |
-|------|--------|---------|
-| **Quick Scan** | ~5 pages | Fast inspection of one site |
-| **Site Scan** | ~30 pages | A useful, complete crawl |
-| **Deep Scan** | ~150 pages | Deeper crawl of a larger site |
-| **Volunteer** | until stopped | Continuous contribution, every limit still applies |
+v2 removed crawl modes — one behaviour, no budgets: **the scout runs until you stop it.** Every resource limit (pages/hour, bandwidth, battery, WiFi, robots.txt, per-domain rate) still applies the whole time.
 
-When a mode's budget is spent, the crawler stops cleanly on its own. **Random Explorer** (continuous random scouting) is opt-in via `startExplorer` — never the default.
+### Random Scout — one button
+
+The main control is a single toggle:
+
+1. **Press** → 5 distinct random seeds are picked from the curated corpus (weighted toward fresh/rare corners), queued at once, and crawling starts.
+2. **It keeps going** — when the queue drains, a fresh bundle of 5 is picked automatically, so the scout wanders from corner to corner until you shut it off.
+3. **Press again** → stops cleanly. **Press once more** → a fresh bundle, a new run.
+
+A bundle (not a single seed) gives the crawl immediate domain diversity and a fallback: if one corner is unreachable, thin, or robots-blocked, the other four still carry the session. Selection history stays in your browser (localStorage) and is **never published** — only the resulting page observations go to Nostr.
 
 ### Discovery Sources
 

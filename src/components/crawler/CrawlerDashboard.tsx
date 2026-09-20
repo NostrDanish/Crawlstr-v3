@@ -85,13 +85,8 @@ export function CrawlerDashboard() {
   const {
     isRunning,
     initialized,
-    mode,
-    modes,
-    setModePreference,
     currentSeed,
     currentSeedCategory,
-    scoutPreview,
-    lastSession,
     stats,
     recentCrawls,
     indexerInfo,
@@ -101,10 +96,7 @@ export function CrawlerDashboard() {
     start,
     stop,
     seedUrl,
-    previewScout,
-    confirmScout,
-    dismissScoutPreview,
-    dismissSessionSummary,
+    toggleScout,
     clearAll,
     updateSettings,
     getSettings,
@@ -198,124 +190,38 @@ export function CrawlerDashboard() {
         </CardHeader>
 
         <CardContent className="pt-0 space-y-4">
-          {/* Random Scout — the onboarding flow */}
-          {!isRunning && !scoutPreview && !lastSession && (
-            <div className="space-y-3">
-              <Button
-                size="lg"
-                variant="outline"
-                onClick={() => previewScout()}
-                disabled={!initialized}
-                className="w-full gap-2 border-primary/40 hover:bg-primary/10 hover:text-primary"
-              >
-                <Shuffle className="h-4 w-4" />
-                Explore a random corner of the web
-              </Button>
-              <p className="text-xs text-center text-muted-foreground">
-                {seedCount.toLocaleString()} curated starting points across {categories.length} categories
-                {scoutedCount > 0 && ` · you've scouted ${scoutedCount}`}
-              </p>
-            </div>
-          )}
-
-          {/* Preview — "random corner" card */}
-          {!isRunning && scoutPreview && (
-            <div className="rounded-lg border border-primary/40 bg-primary/5 p-4 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-primary">
-                <Shuffle className="h-3.5 w-3.5" />
-                RANDOM CORNER
-              </div>
-              <div className="space-y-1">
-                <div className="text-xs text-muted-foreground">
-                  Category: <span className="text-foreground font-medium">{scoutPreview.category}</span>
-                </div>
-                <div className="font-mono text-sm truncate">{scoutPreview.url}</div>
-                <div className="text-xs text-muted-foreground">
-                  {modes[mode].maxPages > 0 ? `${modes[mode].label} · up to ${modes[mode].maxPages} pages` : 'Volunteer · until stopped'}
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <Button onClick={() => confirmScout()} className="flex-1 gap-2">
-                  <Play className="h-4 w-4" />
-                  Scout This
-                </Button>
-                <Button variant="outline" onClick={() => previewScout()} className="gap-2">
-                  <Shuffle className="h-4 w-4" />
-                  Another
-                </Button>
-                <Button variant="ghost" size="icon" onClick={dismissScoutPreview} aria-label="Dismiss">
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Session complete summary */}
-          {!isRunning && !scoutPreview && lastSession && (
-            <div className="rounded-lg border border-primary/40 bg-primary/5 p-4 space-y-3">
-              <div className="flex items-center gap-2 text-xs font-medium text-primary">
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                SCOUT COMPLETE
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
-                <div>
-                  <div className="font-bold">{lastSession.pages}</div>
-                  <div className="text-xs text-muted-foreground">pages</div>
-                </div>
-                <div>
-                  <div className="font-bold">{lastSession.discovered}</div>
-                  <div className="text-xs text-muted-foreground">URLs found</div>
-                </div>
-                <div>
-                  <div className="font-bold">{lastSession.feeds}</div>
-                  <div className="text-xs text-muted-foreground">feeds</div>
-                </div>
-                <div>
-                  <div className="font-bold">{lastSession.sitemaps}</div>
-                  <div className="text-xs text-muted-foreground">sitemaps</div>
-                </div>
-              </div>
-              {lastSession.seed && (
-                <p className="text-xs text-muted-foreground font-mono truncate">
-                  from {lastSession.seed}
-                </p>
+          {/* Random Scout — ONE control: press to queue 5 fresh curated seeds
+              and crawl until stopped; press again to stop; press once more
+              for a fresh bundle. */}
+          <div className="space-y-3">
+            <Button
+              size="lg"
+              variant={isRunning ? 'destructive' : 'outline'}
+              onClick={() => toggleScout()}
+              disabled={!initialized}
+              className={cn(
+                'w-full gap-2',
+                !isRunning && 'border-primary/40 hover:bg-primary/10 hover:text-primary',
               )}
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => { dismissSessionSummary(); previewScout(); }}
-                  className="flex-1 gap-2 border-primary/40 hover:bg-primary/10"
-                >
+            >
+              {isRunning ? (
+                <>
+                  <Square className="h-4 w-4" />
+                  Stop scouting
+                </>
+              ) : (
+                <>
                   <Shuffle className="h-4 w-4" />
-                  Explore Another
-                </Button>
-                <Button variant="ghost" onClick={dismissSessionSummary}>
-                  Done
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Crawl mode picker */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-muted-foreground mr-1">Mode:</span>
-            {(Object.keys(modes) as Array<keyof typeof modes>).map((key) => (
-              <button
-                key={key}
-                onClick={() => !isRunning && setModePreference(key)}
-                disabled={isRunning}
-                className={cn(
-                  'px-3 py-1 rounded-full text-xs font-medium border transition-colors',
-                  mode === key
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'bg-transparent text-muted-foreground border-border hover:border-primary/50',
-                  isRunning && 'opacity-50 cursor-not-allowed',
-                )}
-                title={modes[key].description}
-              >
-                {modes[key].label}
-              </button>
-            ))}
+                  Scout random corners of the web
+                </>
+              )}
+            </Button>
+            <p className="text-xs text-center text-muted-foreground">
+              Each press queues <span className="font-medium text-foreground">5 fresh starting points</span>{' '}
+              from {seedCount.toLocaleString()} curated seeds across {categories.length} categories
+              {scoutedCount > 0 && ` · you've scouted ${scoutedCount}`} — then keeps finding new
+              corners until you stop it.
+            </p>
           </div>
         </CardContent>
 

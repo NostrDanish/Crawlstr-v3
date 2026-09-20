@@ -6,8 +6,10 @@ import {
   totalScouts,
   previewRandomSeed,
   pickRandomSeed,
+  pickRandomSeedBundle,
   commitSeed,
   categoryOf,
+  SCOUT_BUNDLE_SIZE,
 } from './seeds';
 
 // The seed engine reads history from localStorage. jsdom provides a real one;
@@ -111,5 +113,31 @@ describe('privacy', () => {
     for (const entry of Object.values(parsed)) {
       expect(Object.keys(entry as object).sort()).toEqual(['at', 'n']);
     }
+  });
+});
+
+describe('pickRandomSeedBundle (v2 scout toggle)', () => {
+  it('returns SCOUT_BUNDLE_SIZE distinct seeds', () => {
+    const bundle = pickRandomSeedBundle();
+    expect(bundle.length).toBe(SCOUT_BUNDLE_SIZE);
+    expect(new Set(bundle).size).toBe(bundle.length);
+  });
+
+  it('respects an explicit smaller count', () => {
+    const bundle = pickRandomSeedBundle(3);
+    expect(bundle.length).toBe(3);
+  });
+
+  it('every bundle seed is a normalized https corpus URL', () => {
+    const bundle = pickRandomSeedBundle();
+    for (const seed of bundle) {
+      expect(seed.startsWith('https://')).toBe(true);
+    }
+  });
+
+  it('commits each picked seed to history', () => {
+    const before = totalScouts();
+    pickRandomSeedBundle();
+    expect(totalScouts()).toBe(before + SCOUT_BUNDLE_SIZE);
   });
 });
