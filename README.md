@@ -10,7 +10,7 @@ Every page you crawl becomes a **kind 39697 web index observation** — instantl
 
 **Live:** [https://crawlstr.shakespeare.wtf](https://crawlstr.shakespeare.wtf)
 
-[![Edit with Shakespeare](https://shakespeare.diy/badge.svg)](https://shakespeare.diy/clone?url=https%3A%2F%2Fgithub.com%2FNostrDanish%2FCrwalstr.git)
+[![Edit with Shakespeare](https://shakespeare.diy/badge.svg)](https://shakespeare.diy/clone?url=https%3A%2F%2Fgithub.com%2FNostrDanish%2FCrawlstr-v3.git)
 
 ---
 
@@ -161,8 +161,8 @@ Crawlstr finds. Indexstr maintains. Nostr distributes. Searchstr searches.
 ## Quick Start
 
 ```bash
-git clone https://github.com/NostrDanish/Crwalstr.git
-cd Crwalstr
+git clone https://github.com/NostrDanish/Crawlstr-v3.git
+cd Crawlstr-v3
 npm install
 npm run dev
 ```
