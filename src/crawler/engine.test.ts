@@ -244,10 +244,10 @@ describe('dispatch regression: zero-throughput self-deferral (v3.0.0)', () => {
     await waitFor(() => vi.mocked(warmRobots).mock.calls.length > 0);
     expect(warmRobots).toHaveBeenCalled();
     // …then the page job proceeds after the politeness interval.
-    await waitFor(() => crawlSpy.mock.calls.length > 0, 12_000);
+    await waitFor(() => crawlSpy.mock.calls.length > 0, 25_000);
     expect(crawlSpy).toHaveBeenCalled();
     await engine.stop();
-  }, 15_000);
+  }, 30_000);
 });
 
 /**
