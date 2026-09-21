@@ -36,7 +36,7 @@ import { parseFeed, looksLikeFeed, looksLikeSitemap } from './feed';
 import { parseSitemap, sampleUrls } from './sitemap';
 import { normalizeIndexUrl } from './webIndex';
 import { hashContent } from './hasher';
-import { shouldCrawlUrl, getCrawlDelay, getSitemaps } from './robots';
+import { shouldCrawlUrl, getSitemaps, robotsUrlFor, hasCachedRules, warmRobots, peekCrawlDelay } from './robots';
 import { isPubliclyFetchable } from './safety';
 import { publishIndexObservation, publishHeartbeatEvent, flushObservationOutbox } from './publisher';
 import { buildHeartbeat, HEARTBEAT_INTERVAL_MS } from './heartbeat';
@@ -491,10 +491,44 @@ export class CrawlerEngine {
           continue;
         }
 
-        // Robots policy (cached per domain; the lookup is same-origin traffic
-        // and counts toward the domain's politeness lane).
-        const crawlDelay = this.settings.respectRobots ? await getCrawlDelay(job.url) : 0;
-        this.scheduler.noteRequest(job.url);
+        // Robots policy: robots.txt is a SCHEDULED request on the same
+        // per-domain lane (invariant: discovery traffic counts toward the
+        // interval). The page job returns to the queue; the next claim
+        // finds the rules cached and only peeks the delay. Robots must
+        // never be fetched off-lane inside the dispatch path.
+        if (this.settings.respectRobots && !hasCachedRules(job.url)) {
+          const robotsUrl = robotsUrlFor(job.url);
+          if (robotsUrl) {
+            if (!this.scheduler.tryAcquire(robotsUrl)) {
+              const wait = this.scheduler.timeUntilNextRequest(robotsUrl);
+              job.nextAttempt = Date.now() + wait;
+              if (job.recrawl) this.recrawlClaims.delete(job.url);
+              await addToQueue(job);
+              await this.waitForWake(Math.min(Math.max(wait, 1_000), 30_000), ac);
+              continue;
+            }
+            try {
+              await warmRobots(job.url);
+            } finally {
+              this.scheduler.release(robotsUrl); // notes completion — interval starts
+            }
+            job.nextAttempt = Date.now();
+            if (job.recrawl) this.recrawlClaims.delete(job.url);
+            await addToQueue(job);
+            continue;
+          }
+          // Unparseable robots URL — fall through; crawlUrl's own SSRF
+          // guard refuses non-public targets.
+        }
+
+        // Politeness: slot capacity + per-domain seriality + min interval /
+        // robots crawl-delay (capped). Synchronous check+set — no race
+        // window. Never call noteRequest() before the acquire: that stamped
+        // the domain as "just requested", made every tryAcquire fail, and
+        // re-stamped on every retry — an infinite self-deferral where the
+        // queue stayed full and zero pages were ever fetched (the v3.0.0
+        // zero-throughput bug).
+        const crawlDelay = this.settings.respectRobots ? peekCrawlDelay(job.url) : 0;
 
         if (!this.scheduler.tryAcquire(job.url, crawlDelay)) {
           const wait = this.scheduler.timeUntilNextRequest(job.url, crawlDelay);

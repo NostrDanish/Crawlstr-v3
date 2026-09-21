@@ -89,6 +89,8 @@ format (`v` stays `"1"`, kind 39697, byte-compatible `d`/`x`) — v3 changes
 | | v2 | v3 (this) |
 |---|---|---|
 | **Crawl modes** | Several modes to configure | One-button **Random Scout**: queues 5 fresh curated seed bundles and keeps scouting until you stop it |
+| **Dispatch** | `noteRequest()` ran before `tryAcquire()` — every job stamped its own domain "just requested", failed its acquire, and re-stamped on every retry: infinite self-deferral, 0 pages/hour | robots.txt warm-up is a **scheduled request on the domain lane** (acquire → warm → release); page dispatch is a pure `tryAcquire` — regression-tested |
+| **robots.txt unreachable** | Null result was never cached — the domain would warm-loop forever | Fail-open per the documented policy: empty rules are cached, the page proceeds |
 | **Trap defense** | Session keys, query complexity, 3-in-a-row segment repeats | Adds **period-2 generator loops** (`/a/b/a/b/a` — calendar/facet generators) and the `JSSESSIONID` session-key variant |
 | **Retry backoff** | Jitter applied after the cap — a 1-hour sleep could inflate to 72 min | Cap applied **after** jitter — no retry ever waits longer than 1 hour |
 | **Abort handling** | `waitForWake`/`sleep` hung until the timeout when stop fired mid-entry | Already-aborted signals resolve immediately — instant, clean shutdown |

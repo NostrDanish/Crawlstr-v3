@@ -48,6 +48,52 @@ export async function getCrawlDelay(url: string): Promise<number> {
   }
 }
 
+/** robots.txt URL for a page URL (null when the input is unparseable). */
+export function robotsUrlFor(url: string): string | null {
+  try {
+    const urlObj = new URL(url);
+    return `${urlObj.protocol}//${urlObj.host}/robots.txt`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when fresh rules for the URL's host are already cached — i.e. the
+ * crawl-delay can be peeked WITHOUT a network request. The engine uses this
+ * to schedule the robots.txt fetch itself as a politeness-lane request
+ * instead of letting it happen off-lane inside the dispatch path.
+ */
+export function hasCachedRules(url: string): boolean {
+  const robotsUrl = robotsUrlFor(url);
+  if (!robotsUrl) return false;
+  const cached = robotsCache.get(robotsUrl);
+  return !!cached && Date.now() - cached.fetchedAt < CACHE_TTL;
+}
+
+/**
+ * Fetch + cache robots.txt for the URL's host. This IS a network request —
+ * the caller must schedule it on the domain's politeness lane (acquire
+ * before, release after) so it counts toward the per-domain interval.
+ */
+export async function warmRobots(url: string): Promise<void> {
+  const robotsUrl = robotsUrlFor(url);
+  if (!robotsUrl) return;
+  await getRobotsRules(robotsUrl);
+}
+
+/**
+ * Cached crawl-delay for the URL's host (ms), 0 when unknown or stale.
+ * NEVER fetches — pair with hasCachedRules()/warmRobots().
+ */
+export function peekCrawlDelay(url: string): number {
+  const robotsUrl = robotsUrlFor(url);
+  if (!robotsUrl) return 0;
+  const cached = robotsCache.get(robotsUrl);
+  if (!cached || Date.now() - cached.fetchedAt >= CACHE_TTL) return 0;
+  return cached.rules.crawlDelay ?? 0;
+}
+
 /** Fetch robots.txt, falling back to the CORS proxy when blocked directly. */
 async function fetchRobotsText(robotsUrl: string): Promise<string | null> {
   // SSRF guard — the robots check runs BEFORE fetchPage()'s own guard, so
@@ -101,7 +147,16 @@ async function getRobotsRules(robotsUrl: string): Promise<RobotsRules | null> {
   }
 
   const text = await fetchRobotsText(robotsUrl);
-  if (text === null) return null; // Unreachable — caller decides policy.
+  if (text === null) {
+    // Unreachable (network down, proxy blocked). The documented policy is
+    // fail-open — "a public host whose robots.txt cannot be fetched is
+    // treated as allowed" — so cache empty rules and let dispatch proceed.
+    // Returning null uncached would warm-loop the domain forever: every
+    // claim re-fetches robots, the page job never runs.
+    const rules: RobotsRules = { disallowed: [], sitemaps: [] };
+    robotsCache.set(robotsUrl, { rules, fetchedAt: Date.now() });
+    return rules;
+  }
 
   const rules = parseRobotsTxt(text);
   robotsCache.set(robotsUrl, { rules, fetchedAt: Date.now() });

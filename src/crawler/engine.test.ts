@@ -5,7 +5,29 @@ import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CrawlerEngine } from './engine';
 import { getQueueSize, initDB, clearQueue } from './queue';
+import { setRelayPublisher } from './publisher';
 import { DEFAULT_SETTINGS } from './types';
+import { warmRobots } from './robots';
+
+/**
+ * Robots module mock: the robots.txt fetch itself is network I/O — the
+ * dispatch tests only need its CONTRACT (cached or not / warm / peek), not
+ * real traffic. shouldCrawlUrl and everything else stays real. The warmed
+ * flag flips when the engine runs the warm-up, so hasCachedRules mirrors
+ * what a real cache would report.
+ */
+const robotsWarmState = vi.hoisted(() => ({ warmed: false }));
+vi.mock('./robots', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./robots')>();
+  return {
+    ...actual,
+    hasCachedRules: vi.fn(() => robotsWarmState.warmed),
+    warmRobots: vi.fn(async () => {
+      robotsWarmState.warmed = true;
+    }),
+    peekCrawlDelay: vi.fn(() => 0),
+  };
+});
 
 /**
  * Engine-level guards: the queue-admission SSRF gate (audit finding #1) and
@@ -143,4 +165,86 @@ describe('waitForWake (regression: TDZ crash on empty queue)', () => {
     ).waitForWake(60_000, ac);
     await expect(pending).resolves.toBeUndefined();
   });
+});
+
+/**
+ * Regression: the v3.0.0 zero-throughput bug. The slot loop called
+ * scheduler.noteRequest(job.url) BEFORE scheduler.tryAcquire(job.url) —
+ * stamping the domain as "just requested" made every acquire fail, the job
+ * was re-queued with a fresh nextAttempt, and the next attempt re-stamped
+ * the domain again. Infinite self-deferral: the queue stayed full forever
+ * while zero pages were ever fetched (40 min uptime, 0 indexed, 0 bytes).
+ *
+ * The fix: robots.txt warm-up is a SCHEDULED request on the domain lane
+ * (acquire → warm → release, which notes completion), and the page
+ * dispatch is a pure tryAcquire — nothing notes a request before one
+ * actually happens.
+ */
+describe('dispatch regression: zero-throughput self-deferral (v3.0.0)', () => {
+  beforeEach(async () => {
+    await initDB();
+    await clearQueue();
+    robotsWarmState.warmed = false;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function spyOnCrawlUrl() {
+    return vi
+      .spyOn(
+        CrawlerEngine.prototype as unknown as {
+          crawlUrl(job: unknown): Promise<void>;
+        },
+        'crawlUrl',
+      )
+      .mockResolvedValue(undefined);
+  }
+
+  /** Poll the real event loop until `cond` holds (or `ms` elapses). */
+  async function waitFor(cond: () => boolean, ms = 5_000): Promise<void> {
+    const t0 = Date.now();
+    while (!cond() && Date.now() - t0 < ms) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
+  it('a queued job reaches crawlUrl (robots off)', async () => {
+    setRelayPublisher(async () => {});
+    const crawlSpy = spyOnCrawlUrl();
+
+    const engine = new CrawlerEngine({ respectRobots: false });
+    await engine.init();
+    await engine.seedUrl('https://dispatch-regression.example.com/');
+    expect(await getQueueSize()).toBe(1);
+
+    await engine.start();
+    await waitFor(() => crawlSpy.mock.calls.length > 0);
+
+    // Broken code: never called — the job deferred itself forever.
+    expect(crawlSpy).toHaveBeenCalled();
+    await engine.stop();
+  });
+
+  it('robots warm-up runs on the lane, then the page proceeds (robots on)', async () => {
+    setRelayPublisher(async () => {});
+    const crawlSpy = spyOnCrawlUrl();
+
+    // ecoMode off → 5s politeness interval: the robots release stamps the
+    // lane, so the page job must wait exactly one interval before its
+    // acquire succeeds. That's the invariant this test pays 5s to prove.
+    const engine = new CrawlerEngine({ respectRobots: true, ecoMode: false });
+    await engine.init();
+    await engine.seedUrl('https://dispatch-regression-robots.example.com/');
+
+    await engine.start();
+    // The warm-up is a scheduled lane request and runs FIRST.
+    await waitFor(() => vi.mocked(warmRobots).mock.calls.length > 0);
+    expect(warmRobots).toHaveBeenCalled();
+    // …then the page job proceeds after the politeness interval.
+    await waitFor(() => crawlSpy.mock.calls.length > 0, 12_000);
+    expect(crawlSpy).toHaveBeenCalled();
+    await engine.stop();
+  }, 15_000);
 });
