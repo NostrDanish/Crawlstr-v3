@@ -76,10 +76,10 @@ import {
   type CrawlJob,
 } from './types';
 
-/** Indexer software id for the SIP-01 `source` tag (v2 nodes identify as
- *  `crawlstr/v2` so indexers and stats dashboards can distinguish v1/v2
+/** Indexer software id for the SIP-01 `source` tag (v3 nodes identify as
+ *  `crawlstr/v3` so indexers and stats dashboards can distinguish v1/v2/v3
  *  Crawlstr traffic from Indexstr). */
-export const CRAWLER_SOURCE = 'crawlstr/v2';
+export const CRAWLER_SOURCE = 'crawlstr/v3';
 
 /** What one scouting session accomplished — for the completion summary. */
 export interface SessionSummary {
@@ -1141,6 +1141,12 @@ export class CrawlerEngine {
 
   private sleep(ms: number, ac: AbortController | null = this.abortController): Promise<void> {
     return new Promise((resolve) => {
+      // An already-aborted signal never fires 'abort' again — resolve now
+      // instead of sleeping the full duration.
+      if (ac?.signal.aborted) {
+        resolve();
+        return;
+      }
       const timeout = setTimeout(resolve, ms);
       ac?.signal.addEventListener('abort', () => {
         clearTimeout(timeout);
@@ -1152,6 +1158,12 @@ export class CrawlerEngine {
   /** Sleep until a wake event, the timeout, or abort — whichever first. */
   private waitForWake(timeoutMs: number, ac: AbortController | null = this.abortController): Promise<void> {
     return new Promise((resolve) => {
+      // An already-aborted signal never fires 'abort' again — resolve
+      // immediately instead of hanging until the timeout.
+      if (ac?.signal.aborted) {
+        resolve();
+        return;
+      }
       let settled = false;
       // Declared FIRST: every consumer below captures this binding, and the
       // timeout registration evaluates it immediately (a const used before

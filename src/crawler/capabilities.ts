@@ -29,7 +29,7 @@ export interface NodeCapabilities {
 }
 
 /** Crawlstr node protocol version (bump on heartbeat schema changes). */
-export const CRAWLSTR_NODE_VERSION = '2';
+export const CRAWLSTR_NODE_VERSION = '3';
 
 let cached: { caps: NodeCapabilities; at: number } | null = null;
 

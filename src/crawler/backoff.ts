@@ -16,11 +16,13 @@ const BASE_MS = 60_000;
 const MAX_MS = 60 * 60_000; // 1 hour
 const MAX_ATTEMPTS = 5;
 
-/** Backoff delay before retry `attempt` (1-based), with ±20% jitter. */
+/** Backoff delay before retry `attempt` (1-based), with ±20% jitter.
+ *  The cap is applied AFTER jitter so a retry never waits longer than
+ *  MAX_MS — capping before jittering let a 1-hour sleep inflate to 72 min. */
 export function retryBackoffMs(attempt: number): number {
-  const exp = Math.min(MAX_MS, BASE_MS * 2 ** Math.max(0, attempt - 1));
+  const exp = BASE_MS * 2 ** Math.max(0, attempt - 1);
   const jitter = 0.8 + Math.random() * 0.4;
-  return Math.floor(exp * jitter);
+  return Math.min(MAX_MS, Math.floor(exp * jitter));
 }
 
 /** True while a transient failure is still worth retrying. */

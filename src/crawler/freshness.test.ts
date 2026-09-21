@@ -23,7 +23,7 @@ describe('freshness scheduling', () => {
   });
 
   it('an unchanged page doubles its interval (2d, 4d, 8d …)', () => {
-    let state = nextFreshness(undefined, true, NOW - 100 * DAY); // long ago
+    const state = nextFreshness(undefined, true, NOW - 100 * DAY); // long ago
     const before = NOW - DAY; // recrawl happening now-ish
 
     const r1 = nextFreshness(state, false, before);

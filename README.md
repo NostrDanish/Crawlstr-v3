@@ -1,4 +1,4 @@
-# Crawlstr v2
+# Crawlstr v3
 
 <p align="center">
   <img src="public/brand/logo.png" alt="Crawlstr — a spider sitting in its web" width="192" height="192">
@@ -6,7 +6,7 @@
 
 **Decentralized browser-based web crawler.** Turn your browser into a voluntary crawl node that feeds the shared [SIP-01](https://github.com/NostrDanish/SIP-01) index on Nostr — the canonical [Search Index Protocol v1.2](https://github.com/NostrDanish/SIP-01/blob/main/public/spec/SIP-01.md). No backend. No tracking. No accounts required.
 
-Every page you crawl becomes a **kind 39697 web index observation** — instantly searchable by [0xSearchstr](https://0xsearchstr.shakespeare.wtf), [0xPresearchstr](https://presearchstr.shakespeare.wtf), [UNCAGED](https://uncaged.shakespeare.wtf), and any future SIP-01 compatible client. Crawlstr v2 then **keeps those pages alive**: adaptive recrawls re-visit every URL on a change-detected schedule (24h → 30d) and republish the freshness signal.
+Every page you crawl becomes a **kind 39697 web index observation** — instantly searchable by [0xSearchstr](https://0xsearchstr.shakespeare.wtf), [0xPresearchstr](https://presearchstr.shakespeare.wtf), [UNCAGED](https://uncaged.shakespeare.wtf), and any future SIP-01 compatible client. Crawlstr v3 then **keeps those pages alive**: adaptive recrawls re-visit every URL on a change-detected schedule (24h → 30d) and republish the freshness signal.
 
 **Live:** [https://crawlstr.shakespeare.wtf](https://crawlstr.shakespeare.wtf)
 
@@ -79,6 +79,24 @@ Most "decentralized search" projects still run centralized crawlers. Crawlstr ma
 | **PWA** | Installable, works on mobile and desktop |
 
 ---
+
+## What's New in v3
+
+Crawlstr v3 keeps the v2 machinery and hardens the node. Same SIP-01 wire
+format (`v` stays `"1"`, kind 39697, byte-compatible `d`/`x`) — v3 changes
+*behavior*, not the protocol. Observations are tagged `source=crawlstr/v3`.
+
+| | v2 | v3 (this) |
+|---|---|---|
+| **Crawl modes** | Several modes to configure | One-button **Random Scout**: queues 5 fresh curated seed bundles and keeps scouting until you stop it |
+| **Trap defense** | Session keys, query complexity, 3-in-a-row segment repeats | Adds **period-2 generator loops** (`/a/b/a/b/a` — calendar/facet generators) and the `JSSESSIONID` session-key variant |
+| **Retry backoff** | Jitter applied after the cap — a 1-hour sleep could inflate to 72 min | Cap applied **after** jitter — no retry ever waits longer than 1 hour |
+| **Abort handling** | `waitForWake`/`sleep` hung until the timeout when stop fired mid-entry | Already-aborted signals resolve immediately — instant, clean shutdown |
+| **Heartbeat privacy** | Raw counters (`pagesIndexed`, `queueSize`, `published`) left the device | Counters coarsened to two significant figures before signing (indexstr F14) — exact totals never leave the device |
+
+Source-tag history: v1 nodes emit `crawlstr/1`, v2 nodes emit `crawlstr/v2`,
+v3 nodes emit `crawlstr/v3`. All remain valid SIP-01; dashboards can tell the
+traffic apart.
 
 ## What's New in v2
 
@@ -263,7 +281,7 @@ Crawlstr publishes **SIP-01 (Search Index Protocol)** events — the same protoc
     ["l", "en"],
     ["x", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
     ["v", "1"],
-    ["source", "crawlstr/v2"],
+    ["source", "crawlstr/v3"],
     ["network", "clearnet"],
     ["type", "page"],
     ["alt", "Web index observation: Example Page"]
@@ -278,7 +296,7 @@ Crawlstr publishes **SIP-01 (Search Index Protocol)** events — the same protoc
 | `x` | Content hash: `sha256(title + "\n" + description)` |
 | `v` | Schema version `"1"` |
 | `l` | ISO 639-1 language code |
-| `source` | `"crawlstr/v2"` (v1 nodes: `"crawlstr/1"`) |
+| `source` | `"crawlstr/v3"` (v2 nodes: `"crawlstr/v2"`, v1 nodes: `"crawlstr/1"`) |
 | `network` | Extension registry (§9.2) — always `clearnet` for a browser crawler |
 | `type` | Extension registry — `repository` for GitHub/GitLab, else `page` |
 | `alt` | Human-readable description (the `alt` convention, spec §12.3) |
@@ -373,7 +391,7 @@ src/
 ├── crawler/
 │   ├── engine.ts           ← Main orchestrator: event-driven multi-slot loop,
 │   │                         freshness gate, trap guards, negative cache,
-│   │                         fire-and-track publish lane (source=crawlstr/v2)
+│   │                         fire-and-track publish lane (source=crawlstr/v3)
 │   ├── queue.ts            ← IndexedDB queue v4: atomic job claims, observed/
 │   │                         fetched/failed split, adaptive recrawl fields,
 │   │                         negative cache + maintenance sweep, outbox

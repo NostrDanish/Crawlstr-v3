@@ -327,7 +327,7 @@ describe('verifyObservation — integrity (spec §18 step 2)', () => {
       description: 'A page about examples.',
       tags: ['nostr'],
       language: 'en',
-      source: 'crawlstr/v2',
+      source: 'crawlstr/v3',
       type: 'page',
       network: 'clearnet',
     });

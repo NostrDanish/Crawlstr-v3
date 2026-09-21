@@ -41,19 +41,19 @@ Consumers treat heartbeats older than **1 hour** as offline.
   "kind": 16919,
   "pubkey": "<device indexer pubkey>",
   "created_at": 1786250000,
-  "content": "{\"v\":\"2\",\"shard\":\"C4\",\"platform\":\"desktop\",\"network\":\"wifi-or-better\",\"charging\":true,\"stats\":{\"pagesIndexed\":1204,\"queueSize\":183,\"published\":1198}}",
+  "content": "{\"v\":\"3\",\"shard\":\"C4\",\"platform\":\"desktop\",\"network\":\"wifi-or-better\",\"charging\":true,\"stats\":{\"pagesIndexed\":1204,\"queueSize\":183,\"published\":1198}}",
   "tags": [
-    ["v", "2"],
+    ["v", "3"],
     ["shard", "C4"],
-    ["source", "crawlstr/v2"],
+    ["source", "crawlstr/v3"],
     ["alt", "Crawlstr node heartbeat: shard C4"]
   ]
 }
 ```
 
-**Tags:** `v` (node protocol version — `"2"` for Crawlstr v2 nodes), `shard`
+**Tags:** `v` (node protocol version — `"3"` for Crawlstr v3 nodes), `shard`
 (home shard, two uppercase hex chars — first byte of the indexer pubkey),
-`source` (`crawlstr/v2`), `alt` (human-readable).
+`source` (`crawlstr/v3`), `alt` (human-readable).
 
 **Content** (JSON): `v`, `shard`, coarse `platform` (`mobile`/`desktop`),
 coarse `network` class, `charging`, and self-reported `stats`
@@ -95,7 +95,7 @@ public metadata."*
     ["x", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
     ["v", "1"],
     ["published", "1786200000"],
-    ["source", "crawlstr/v2"],
+    ["source", "crawlstr/v3"],
     ["network", "clearnet"],
     ["type", "page"],
     ["alt", "Web index observation: Example Page"]
@@ -115,7 +115,7 @@ public metadata."*
 | `l` | – | ISO 639-1 language code, bare two-letter form (§12.5; convention from NIP-32) |
 | `t` | – | 0–8 lowercase topic tags matching `^[a-z0-9][a-z0-9-]{0,99}$` |
 | `published` | – | Unix seconds — page's claimed publication time (§12.2) |
-| `source` | – | `"crawlstr/v2"` — identifies this software (≤ 100 chars); v1 nodes emitted `crawlstr/1` and remain valid |
+| `source` | – | `"crawlstr/v3"` — identifies this software (≤ 100 chars); v2 nodes emitted `crawlstr/v2`, v1 nodes `crawlstr/1`, and both remain valid |
 
 **Extension tags (spec §9.2 registry):**
 

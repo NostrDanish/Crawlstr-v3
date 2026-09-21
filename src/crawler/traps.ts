@@ -15,6 +15,7 @@
 /** Query keys that identify per-visitor session state — never indexable. */
 const SESSION_KEYS = new Set([
   'sid', 'session', 'sessionid', 'sessid', 'phpsessid', 'jsessionid',
+  'jssessionid', // common JSESSIONID double-S variant seen in the wild
   'aspsessionid', 'asp.net_sessionid', 'cfid', 'cftoken', 'zenid', 'oscsid',
 ]);
 
@@ -49,9 +50,15 @@ export function isLikelyCrawlTrap(normalizedUrl: string): boolean {
   // 3. Trap path segments.
   if (lowered.some((s) => TRAP_SEGMENTS.has(s))) return true;
 
-  // 4. Same segment repeating 3+ times (a/b/a/b/a = generator loop).
+  // 4. Repeating-segment generator loops.
+  //    Period 1: same segment 3+ times in a row (/a/a/a).
+  //    Period 2: an alternating pair looping 2+ times (/a/b/a/b/a) —
+  //    calendar/facet generators produce exactly this shape.
   for (let i = 2; i < lowered.length; i++) {
     if (lowered[i] === lowered[i - 1] && lowered[i] === lowered[i - 2]) return true;
+  }
+  for (let i = 3; i < lowered.length; i++) {
+    if (lowered[i] === lowered[i - 2] && lowered[i - 1] === lowered[i - 3]) return true;
   }
 
   // 5. Very long pure-numeric path segment (9+ digits) — counter space.

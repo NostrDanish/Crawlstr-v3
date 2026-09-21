@@ -16,7 +16,8 @@
  * observations (independent, comparable across indexers).
  *
  * Privacy contract: coarse classes only. No location, no IP, no device
- * model, no fine-grained fingerprint.
+ * model, no fine-grained fingerprint. Counters are coarsened before
+ * signing (indexstr F14): exact totals never leave the device.
  */
 
 import { finalizeEvent, type EventTemplate } from 'nostr-tools/pure';
@@ -24,6 +25,20 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { getIndexerIdentity, getIndexerSecretKey } from './indexerIdentity';
 import { nodeShard, shardLabel } from './sharding';
 import { getNodeCapabilities, CRAWLSTR_NODE_VERSION } from './capabilities';
+
+/**
+ * Coarsen a counter to two significant figures, rounding DOWN (indexstr F14):
+ * exact below 100, then nearest 10/100/1k/… — 123 → 120, 12_345 → 12_000.
+ * Heartbeats are a health/coverage signal; exact totals would be a
+ * fingerprint and are never needed by consumers (which clamp via
+ * Math.max(0, …) on parse anyway).
+ */
+export function coarsenCount(n: number): number {
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  if (n < 100) return Math.floor(n);
+  const step = 10 ** (Math.floor(Math.log10(n)) - 1);
+  return Math.floor(n / step) * step;
+}
 
 /** Replaceable event kind for crawler node heartbeats. */
 export const HEARTBEAT_KIND = 16919;
@@ -67,7 +82,11 @@ export async function buildHeartbeat(stats: HeartbeatStats): Promise<NostrEvent>
     platform: caps.platform,
     network: caps.network,
     charging: caps.charging,
-    stats,
+    stats: {
+      pagesIndexed: coarsenCount(stats.pagesIndexed),
+      queueSize: coarsenCount(stats.queueSize),
+      published: coarsenCount(stats.published),
+    },
   };
 
   const template: EventTemplate = {
@@ -77,7 +96,7 @@ export async function buildHeartbeat(stats: HeartbeatStats): Promise<NostrEvent>
     tags: [
       ['v', CRAWLSTR_NODE_VERSION],
       ['shard', shardLabel(shard)],
-      ['source', 'crawlstr/v2'],
+      ['source', 'crawlstr/v3'],
       ['alt', `Crawlstr node heartbeat: shard ${shardLabel(shard)}`],
     ],
   };

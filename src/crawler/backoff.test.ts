@@ -17,10 +17,17 @@ describe('retry backoff', () => {
   });
 
   it('caps at 1 hour', () => {
-    for (let attempt = 4; attempt <= 10; attempt++) {
+    // The exponential reaches the cap at attempt 7 (2^6 min = 64 min > 60 min).
+    // From there the jittered delay must stay within (48 min, 60 min] —
+    // jitter must never inflate past the cap.
+    for (let attempt = 7; attempt <= 10; attempt++) {
       const delay = retryBackoffMs(attempt);
       expect(delay).toBeLessThanOrEqual(60 * 60_000);
       expect(delay).toBeGreaterThan(48 * 60_000);
+    }
+    // And no attempt — capped or not — ever exceeds the cap.
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      expect(retryBackoffMs(attempt)).toBeLessThanOrEqual(60 * 60_000);
     }
   });
 
