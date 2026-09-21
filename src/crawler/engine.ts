@@ -650,11 +650,14 @@ export class CrawlerEngine {
 
     // 5. Fetch page. Clamp the size cap to the remaining hourly bandwidth so
     //    a single page can't blow the budget. Not enough budget → requeue
-    //    for later (the claimed job must not vanish).
+    //    for later (the claimed job must not vanish). maxBandwidthMB 0 =
+    //    cap fully off — no clamp, no requeue.
     const bandwidthLimitBytes = this.settings.maxBandwidthMB * 1024 * 1024;
-    const remainingKB = Math.floor(remainingBytesThisHour(bandwidthLimitBytes) / 1024);
+    const remainingKB = this.settings.maxBandwidthMB > 0
+      ? Math.floor(remainingBytesThisHour(bandwidthLimitBytes) / 1024)
+      : this.settings.maxPageSizeKB;
     const effectiveMaxKB = Math.max(0, Math.min(this.settings.maxPageSizeKB, remainingKB));
-    if (effectiveMaxKB < 16) {
+    if (this.settings.maxBandwidthMB > 0 && effectiveMaxKB < 16) {
       job.nextAttempt = Date.now() + 5 * 60_000;
       // The job returns to the queue — release any recrawl claim.
       if (job.recrawl) this.recrawlClaims.delete(job.url);
@@ -1161,7 +1164,8 @@ export class CrawlerEngine {
     // Gate on the minimum meaningful page size so crawlUrl never busy-loops
     // on a budget too small to fetch with.
     const bandwidthLimitBytes = this.settings.maxBandwidthMB * 1024 * 1024;
-    if (bytesLastHour() + 16 * 1024 > bandwidthLimitBytes) {
+    // maxBandwidthMB 0 = cap fully off — the crawler just runs.
+    if (this.settings.maxBandwidthMB > 0 && bytesLastHour() + 16 * 1024 > bandwidthLimitBytes) {
       return false;
     }
 

@@ -26,6 +26,7 @@ import {
   Send,
   Inbox,
   Ban,
+  Gauge,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -688,6 +689,25 @@ export function CrawlerDashboard() {
                     id="eco-mode"
                     checked={settings.ecoMode}
                     onCheckedChange={(v) => changeSettings({ ecoMode: v })}
+                  />
+                </div>
+
+                <Separator />
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Gauge className="h-4 w-4 text-muted-foreground" />
+                    <div>
+                      <Label htmlFor="bandwidth-cap">Bandwidth Cap</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Limit data usage (25 MB/hour) — turn off and it just runs
+                      </p>
+                    </div>
+                  </div>
+                  <Switch
+                    id="bandwidth-cap"
+                    checked={settings.maxBandwidthMB > 0}
+                    onCheckedChange={(v) => changeSettings({ maxBandwidthMB: v ? 25 : 0 })}
                   />
                 </div>
 

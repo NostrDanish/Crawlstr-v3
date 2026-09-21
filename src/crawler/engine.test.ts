@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { CrawlerEngine } from './engine';
 import { getQueueSize, initDB, clearQueue } from './queue';
 import { setRelayPublisher } from './publisher';
+import { recordFetch, resetMeter } from './meter';
 import { DEFAULT_SETTINGS } from './types';
 import { warmRobots } from './robots';
 
@@ -247,4 +248,36 @@ describe('dispatch regression: zero-throughput self-deferral (v3.0.0)', () => {
     expect(crawlSpy).toHaveBeenCalled();
     await engine.stop();
   }, 15_000);
+});
+
+/**
+ * Bandwidth cap — unlimited mode (maxBandwidthMB 0 = cap fully off).
+ * NOTE: this block runs LAST in the file on purpose — it records 500 MB
+ * into the module-level meter, and the meter's sliding window would poison
+ * canCrawl() for any later bandwidth-sensitive test in this file.
+ */
+describe('bandwidth cap: unlimited mode (0 = off)', () => {
+  beforeEach(async () => {
+    await initDB();
+    await clearQueue();
+    resetMeter();
+  });
+
+  function canCrawl(engine: CrawlerEngine): Promise<boolean> {
+    return (engine as unknown as { canCrawl(): Promise<boolean> }).canCrawl();
+  }
+
+  it('canCrawl blocks when the hourly budget is blown', async () => {
+    const engine = new CrawlerEngine({ maxBandwidthMB: 1 });
+    await engine.init();
+    recordFetch(500 * 1024 * 1024); // 500 MB this hour — far over a 1 MB cap
+    await expect(canCrawl(engine)).resolves.toBe(false);
+  });
+
+  it('canCrawl ignores the budget entirely when the cap is 0 (off)', async () => {
+    const engine = new CrawlerEngine({ maxBandwidthMB: 0 });
+    await engine.init();
+    recordFetch(500 * 1024 * 1024);
+    await expect(canCrawl(engine)).resolves.toBe(true);
+  });
 });

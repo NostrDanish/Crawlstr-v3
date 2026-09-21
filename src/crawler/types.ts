@@ -97,6 +97,8 @@ export interface CrawlerSettings {
   wifiOnly: boolean;
   chargingOnly: boolean;
   respectRobots: boolean;
+  /** Hourly bandwidth budget in MB. 0 = UNLIMITED (cap fully off — the
+   *  crawler just runs). Default 25. */
   maxBandwidthMB: number;
   maxPagesPerHour: number;
   maxDepth: number;
